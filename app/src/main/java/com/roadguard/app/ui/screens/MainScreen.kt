@@ -37,6 +37,7 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import com.roadguard.app.data.ml.MlDetectionAnalyzer
+import com.roadguard.app.data.ml.VideoMlAnalyzer
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.ui.components.SettingsBottomSheet
 import com.roadguard.app.ui.components.VideoPreview
@@ -56,6 +57,7 @@ fun MainScreen(
     var showSettings by remember { mutableStateOf(false) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPicker by remember { mutableStateOf(false) }
+    val videoAnalyzer = remember { VideoMlAnalyzer() }
 
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
@@ -82,12 +84,25 @@ fun MainScreen(
         }
     }
 
+    LaunchedEffect(videoAnalyzer) {
+        videoAnalyzer.laneInfo.collect { laneInfo ->
+            laneInfo?.let { viewModel.updateLaneInfo(it) }
+        }
+    }
+
+    LaunchedEffect(videoAnalyzer) {
+        videoAnalyzer.vehicleDistance.collect { distance ->
+            distance?.let { viewModel.updateVehicleDistance(it) }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         when {
             showVideoPicker && videoUri != null -> {
                 VideoPreview(
                     videoUri = videoUri!!,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    videoAnalyzer = videoAnalyzer
                 )
 
                 WarningOverlay(
