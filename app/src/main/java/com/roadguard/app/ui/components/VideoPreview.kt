@@ -37,6 +37,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun VideoPreview(
@@ -81,6 +82,10 @@ fun VideoPreview(
         }
         exoPlayer.addListener(listener)
 
+        if (exoPlayer.isPlaying && frameProcessor == null && videoAnalyzer != null) {
+            frameProcessor = startFrameProcessing(context, exoPlayer, videoAnalyzer)
+        }
+
         onDispose {
             exoPlayer.removeListener(listener)
         }
@@ -124,55 +129,59 @@ private fun startFrameProcessing(
     exoPlayer: ExoPlayer,
     videoAnalyzer: VideoMlAnalyzer
 ): Job {
-    return CoroutineScope(Dispatchers.Main).launch {
+    return CoroutineScope(Dispatchers.Default).launch {
         val retriever = MediaMetadataRetriever()
-        var fileDescriptorSet = false
-
+        var retrieverInitialized = false
         val frameInterval = 300L
         var lastProcessedPosition = -1L
+        var lastFrameTime = 0L
 
         while (isActive) {
-            if (exoPlayer.isPlaying) {
-                val currentPos = exoPlayer.currentPosition
-                if (currentPos != lastProcessedPosition) {
-                    lastProcessedPosition = currentPos
+            val currentPos = withContext(Dispatchers.Main) { exoPlayer.currentPosition }
+            val isPlaying = withContext(Dispatchers.Main) { exoPlayer.isPlaying }
 
-                    if (!fileDescriptorSet) {
-                        try {
-                            val uri = exoPlayer.currentMediaItem?.localConfiguration?.uri
-                            if (uri != null) {
-                                val fileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
-                                fileDescriptor?.let {
-                                    retriever.setDataSource(it.fileDescriptor)
-                                    fileDescriptorSet = true
-                                }
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+            if (isPlaying) {
+                if (!retrieverInitialized) {
+                    try {
+                        val uri = withContext(Dispatchers.Main) { exoPlayer.currentMediaItem?.localConfiguration?.uri }
+                        if (uri != null) {
+                            retriever.setDataSource(context, uri)
+                            retrieverInitialized = true
+                            android.util.Log.d("VideoPreview", "Retriever initialized with URI: $uri")
                         }
+                    } catch (e: Exception) {
+                        android.util.Log.e("VideoPreview", "Failed to init retriever", e)
                     }
+                }
 
-                    if (fileDescriptorSet) {
-                        try {
-                            val bitmap = retriever.getFrameAtTime(
-                                currentPos * 1000,
-                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                            )
-                            bitmap?.let {
-                                val scaledBitmap = Bitmap.createScaledBitmap(it, 640, 360, true)
-                                videoAnalyzer.analyzeFrame(scaledBitmap, scaledBitmap.width, scaledBitmap.height)
-                                scaledBitmap.recycle()
-                                it.recycle()
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                val currentTime = System.currentTimeMillis()
+                if (retrieverInitialized && currentPos != lastProcessedPosition && currentTime - lastFrameTime > frameInterval) {
+                    lastProcessedPosition = currentPos
+                    lastFrameTime = currentTime
+
+                    try {
+                        val bitmap = retriever.getFrameAtTime(
+                            currentPos * 1000,
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                        )
+                        if (bitmap != null) {
+                            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 640, 360, true)
+                            videoAnalyzer.analyzeFrame(scaledBitmap, scaledBitmap.width, scaledBitmap.height)
+                            scaledBitmap.recycle()
+                            bitmap.recycle()
                         }
+                    } catch (e: Exception) {
+                        android.util.Log.e("VideoPreview", "Frame extraction failed", e)
                     }
                 }
             }
-            delay(frameInterval)
+            delay(100L)
         }
 
-        retriever.release()
+        try {
+            retriever.release()
+        } catch (e: Exception) {
+            android.util.Log.e("VideoPreview", "Failed to release retriever", e)
+        }
     }
 }
