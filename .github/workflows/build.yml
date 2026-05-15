@@ -38,13 +38,22 @@ jobs:
         id: get_tag
         run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
+      - name: Set Artifact Name
+        id: artifact_name
+        run: |
+          if [[ "${{ github.ref_name }}" == v* ]]; then
+            echo "NAME=RoadGuard-${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "NAME=RoadGuard-debug" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RoadGuard-${{ steps.get_tag.outputs.tag }}
+          name: ${{ steps.artifact_name.outputs.NAME }}
           path: app/build/outputs/apk/debug/app-debug.apk
 
   release:
