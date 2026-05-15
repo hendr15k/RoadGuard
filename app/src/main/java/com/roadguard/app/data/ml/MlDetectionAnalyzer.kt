@@ -67,7 +67,11 @@ class MlDetectionAnalyzer(
             )
 
             val yBuffer = mediaImage.planes[0].buffer
+            val uBuffer = mediaImage.planes[1].buffer
+            val vBuffer = mediaImage.planes[2].buffer
+
             val yData = ByteArray(yBuffer.remaining())
+            yBuffer.rewind()
             yBuffer.get(yData)
 
             val swResult = laneDetector.detectLanesFromYUV(yData, imageProxy.width, imageProxy.height)
@@ -78,7 +82,10 @@ class MlDetectionAnalyzer(
 
             if (tfliteRunner?.isLoaded() == true) {
                 try {
-                    val segmentation = tfliteRunner!!.runSegmentationYUV(yData, imageProxy.width, imageProxy.height)
+                    yBuffer.rewind()
+                    uBuffer.rewind()
+                    vBuffer.rewind()
+                    val segmentation = tfliteRunner!!.runSegmentationYUV(yBuffer, uBuffer, vBuffer, imageProxy.width, imageProxy.height)
                     val segResult = tfliteRunner!!.detectLanesFromSegmentation(
                         segmentation[0],
                         imageProxy.width,

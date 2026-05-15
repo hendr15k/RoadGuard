@@ -70,7 +70,7 @@ class LaneDetector(
         }
 
         if (lastRightBaseX != null) {
-            val rightNeg = (lastRightBaseX!! - 100).coerceIn(midX, 0)
+            val rightNeg = (lastRightBaseX!! - 100).coerceIn(midX, width - 1)
             val rightPos = (lastRightBaseX!! + 100).coerceIn(midX, width - 1)
             rightBaseX = argMax(hist, rightNeg, rightPos) + rightNeg
             lastRightBaseX = null
@@ -262,7 +262,7 @@ class LaneDetector(
         }
 
         if (lastRightBaseX != null) {
-            val rightNeg = (lastRightBaseX!! - 100).coerceIn(midX, 0)
+            val rightNeg = (lastRightBaseX!! - 100).coerceIn(midX, width - 1)
             val rightPos = (lastRightBaseX!! + 100).coerceIn(midX, width - 1)
             rightBaseX = argMax(hist, rightNeg, rightPos) + rightNeg
             lastRightBaseX = null

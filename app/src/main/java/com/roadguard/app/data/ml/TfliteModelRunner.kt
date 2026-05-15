@@ -2,18 +2,11 @@ package com.roadguard.app.data.ml
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.ImageFormat
-import android.graphics.Matrix
-import android.renderscript.Allocation
-import android.renderscript.Element
-import android.renderscript.RenderScript
-import android.renderscript.ScriptIntrinsicYuvToRGB
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 
 class TfliteModelRunner(private val context: Context) {
 
@@ -91,8 +84,8 @@ class TfliteModelRunner(private val context: Context) {
         return arrayOf(result)
     }
 
-    fun runSegmentationYUV(yData: ByteArray, width: Int, height: Int): Array<Array<IntArray>> {
-        val bitmap = yuvToBitmap(yData, width, height)
+    fun runSegmentationYUV(yBuffer: ByteBuffer, uBuffer: ByteBuffer, vBuffer: ByteBuffer, width: Int, height: Int): Array<Array<IntArray>> {
+        val bitmap = yuvToBitmap(yBuffer, uBuffer, vBuffer, width, height)
         return runSegmentation(bitmap)
     }
 
@@ -169,25 +162,32 @@ class TfliteModelRunner(private val context: Context) {
         return inputBuffer
     }
 
-    @Suppress("DEPRECATION")
-    private fun yuvToBitmap(yData: ByteArray, width: Int, height: Int): Bitmap {
+    private fun yuvToBitmap(yPlane: ByteBuffer, uPlane: ByteBuffer, vPlane: ByteBuffer, width: Int, height: Int): Bitmap {
         return try {
-            val yuvBuffer = ByteBuffer.allocate(yData.size + width * height / 2)
-            yuvBuffer.put(yData)
-            yuvBuffer.rewind()
+            val yRowStride = yPlane.remaining() / height
+            val uvRowStride = uPlane.remaining() / (height / 2)
 
-            val rs = RenderScript.create(context)
-            val yuvToRgb = ScriptIntrinsicYuvToRGB.create(rs, Element.U8_4(rs))
-            val yuvAllocation = Allocation.createSized(rs, Element.U8(rs), yData.size)
-            yuvAllocation.copyFrom(yData)
-            val rgbaAllocation = Allocation.createTyped(rs, android.renderscript.Type.Builder(rs, Element.RGBA_8888(rs))
-                .setX(width).setY(height).create())
-            yuvToRgb.setInput(yuvAllocation)
-            yuvToRgb.forEach(rgbaAllocation)
             val pixels = IntArray(width * height)
-            rgbaAllocation.copyTo(pixels)
 
-            rs.destroy()
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    val yIndex = y * yRowStride + x
+                    val uvX = x / 2
+                    val uvY = y / 2
+                    val uvIndex = uvY * uvRowStride + uvX
+
+                    val yVal = if (yIndex < yPlane.remaining()) yPlane.get(yIndex).toInt() and 0xFF else 0
+                    val uVal = if (uvIndex < uPlane.remaining()) uPlane.get(uvIndex).toInt() and 0xFF else 128
+                    val vVal = if (uvIndex < vPlane.remaining()) vPlane.get(uvIndex).toInt() and 0xFF else 128
+
+                    val r = (yVal + 1.402 * (vVal - 128)).toInt().coerceIn(0, 255)
+                    val g = (yVal - 0.344136 * (uVal - 128) - 0.714136 * (vVal - 128)).toInt().coerceIn(0, 255)
+                    val b = (yVal + 1.772 * (uVal - 128)).toInt().coerceIn(0, 255)
+
+                    pixels[y * width + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+
             Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
         } catch (e: Exception) {
             e.printStackTrace()
