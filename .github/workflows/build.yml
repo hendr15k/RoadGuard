@@ -3,6 +3,8 @@ name: Build & Release APK
 on:
   push:
     branches: [master]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -32,18 +34,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
+      - name: Get Tag
+        id: get_tag
+        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RoadGuard-debug
+          name: RoadGuard-${{ steps.get_tag.outputs.tag }}
           path: app/build/outputs/apk/debug/app-debug.apk
 
   release:
     needs: build
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
 
@@ -51,7 +58,7 @@ jobs:
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: RoadGuard-debug
+          name: RoadGuard-${{ github.ref_name }}
           path: ./apk
 
       - name: Create Release
@@ -59,6 +66,5 @@ jobs:
         with:
           files: ./apk/app-debug.apk
           generate_release_notes: true
-          commitish: master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
