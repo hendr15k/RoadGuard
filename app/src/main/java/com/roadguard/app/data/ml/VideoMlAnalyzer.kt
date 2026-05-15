@@ -22,6 +22,8 @@ class VideoMlAnalyzer(
             .build()
     )
 
+    private val laneDetector = LaneDetector(laneSensitivity)
+
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
 
@@ -29,7 +31,7 @@ class VideoMlAnalyzer(
     val vehicleDistance: StateFlow<VehicleDistance?> = _vehicleDistance.asStateFlow()
 
     private var lastProcessTime = 0L
-    private val processInterval = 200L
+    private val processInterval = 250L
 
     fun analyzeFrame(bitmap: Bitmap, width: Int, height: Int) {
         val currentTime = System.currentTimeMillis()
@@ -37,60 +39,18 @@ class VideoMlAnalyzer(
         lastProcessTime = currentTime
 
         try {
+            val laneResult = laneDetector.detectLanes(bitmap, width, height)
+
+            _laneInfo.value = LaneInfo(
+                isDriftingLeft = laneResult.isDriftingLeft,
+                isDriftingRight = laneResult.isDriftingRight,
+                confidence = laneResult.confidence
+            )
+
             val inputImage = InputImage.fromBitmap(bitmap, 0)
-            detectLanesFromImage(bitmap, width, height)
             detectVehicles(inputImage)
         } catch (e: Exception) {
             e.printStackTrace()
-        }
-    }
-
-    private fun detectLanesFromImage(bitmap: Bitmap, width: Int, height: Int) {
-        try {
-            val pixels = IntArray(width * height)
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-
-            val centerY = height / 2
-
-            var leftLaneScore = 0f
-            var rightLaneScore = 0f
-
-            val step = 20
-            val totalRows = (height - centerY) / step
-
-            for (row in (centerY until height).step(step)) {
-                var leftMax = 0
-                var rightMax = 0
-
-                for (col in (width / 4 until width / 2).step(10)) {
-                    val pixel = pixels[row * width + col]
-                    val gray = (pixel shr 16 and 0xFF)
-                    if (gray > leftMax) leftMax = gray
-                }
-                for (col in (width / 2 until 3 * width / 4).step(10)) {
-                    val pixel = pixels[row * width + col]
-                    val gray = (pixel shr 16 and 0xFF)
-                    if (gray > rightMax) rightMax = gray
-                }
-
-                if (leftMax > 150) leftLaneScore += 1f
-                if (rightMax > 150) rightLaneScore += 1f
-            }
-
-            if (totalRows > 0) {
-                leftLaneScore /= totalRows
-                rightLaneScore /= totalRows
-            }
-
-            val threshold = 1f - laneSensitivity
-
-            _laneInfo.value = LaneInfo(
-                isDriftingLeft = leftLaneScore < threshold && leftLaneScore > 0.1f,
-                isDriftingRight = rightLaneScore < threshold && rightLaneScore > 0.1f,
-                confidence = maxOf(leftLaneScore, rightLaneScore)
-            )
-        } catch (e: Exception) {
-            _laneInfo.value = null
         }
     }
 

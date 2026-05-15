@@ -25,6 +25,8 @@ class MlDetectionAnalyzer(
             .build()
     )
 
+    private val laneDetector = LaneDetector(laneSensitivity)
+
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
 
@@ -50,58 +52,23 @@ class MlDetectionAnalyzer(
                 imageProxy.imageInfo.rotationDegrees
             )
 
-            detectLanesFromImage(mediaImage, imageProxy.width, imageProxy.height)
+            val yBuffer = mediaImage.planes[0].buffer
+            val yData = ByteArray(yBuffer.remaining())
+            yBuffer.get(yData)
+
+            val result = laneDetector.detectLanesFromYUV(yData, imageProxy.width, imageProxy.height)
+
+            _laneInfo.value = LaneInfo(
+                isDriftingLeft = result.isDriftingLeft,
+                isDriftingRight = result.isDriftingRight,
+                confidence = result.confidence
+            )
+
             detectVehicles(inputImage)
 
             imageProxy.close()
         } else {
             imageProxy.close()
-        }
-    }
-
-    private fun detectLanesFromImage(image: android.media.Image, width: Int, height: Int) {
-        try {
-            val yBuffer = image.planes[0].buffer
-            val yData = ByteArray(yBuffer.remaining())
-            yBuffer.get(yData)
-
-            val centerY = height / 2
-
-            var leftLaneScore = 0f
-            var rightLaneScore = 0f
-
-            val step = 20
-            for (row in (centerY until height).step(step)) {
-                val rowOffset = row * width
-
-                var leftMax = 0
-                var rightMax = 0
-                for (col in (width / 4 until width / 2).step(10)) {
-                    val pixelValue = yData[rowOffset + col].toInt() and 0xFF
-                    if (pixelValue > leftMax) leftMax = pixelValue
-                }
-                for (col in (width / 2 until 3 * width / 4).step(10)) {
-                    val pixelValue = yData[rowOffset + col].toInt() and 0xFF
-                    if (pixelValue > rightMax) rightMax = pixelValue
-                }
-
-                if (leftMax > 150) leftLaneScore += 1f
-                if (rightMax > 150) rightLaneScore += 1f
-            }
-
-            val totalRows = (height - centerY) / step
-            leftLaneScore /= totalRows
-            rightLaneScore /= totalRows
-
-            val threshold = 1f - laneSensitivity
-
-            _laneInfo.value = LaneInfo(
-                isDriftingLeft = leftLaneScore < threshold && leftLaneScore > 0.1f,
-                isDriftingRight = rightLaneScore < threshold && rightLaneScore > 0.1f,
-                confidence = maxOf(leftLaneScore, rightLaneScore)
-            )
-        } catch (e: Exception) {
-            _laneInfo.value = null
         }
     }
 
