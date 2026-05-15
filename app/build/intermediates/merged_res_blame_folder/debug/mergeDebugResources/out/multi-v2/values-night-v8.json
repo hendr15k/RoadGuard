@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.roadguard.app-mergeDebugResources-62:/values-night-v8/values-night-v8.xml",
+            "outputFile": "com.roadguard.app-mergeDebugResources-67:/values-night-v8/values-night-v8.xml",
             "map": [
                 {
                     "source": "/root/.gradle/caches/transforms-3/83bd0412282545c9223a7e33e3adb2dc/transformed/appcompat-1.1.0/res/values-night-v8/values-night-v8.xml",

@@ -6,6 +6,8 @@ import android.view.View;
 import androidx.fragment.app.Fragment;
 import androidx.lifecycle.SavedStateHandle;
 import androidx.lifecycle.ViewModel;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.roadguard.app.data.repository.SettingsRepository;
 import com.roadguard.app.domain.usecase.GetSettingsUseCase;
 import com.roadguard.app.domain.usecase.UpdateSettingsUseCase;
@@ -29,7 +31,6 @@ import dagger.internal.DaggerGenerated;
 import dagger.internal.DoubleCheck;
 import dagger.internal.Preconditions;
 import dagger.internal.Provider;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.processing.Generated;
@@ -370,7 +371,7 @@ public final class DaggerRoadGuardApp_HiltComponents_SingletonC {
 
     @Override
     public Set<String> getViewModelKeys() {
-      return Collections.<String>singleton(MainViewModel_HiltModules_KeyModule_ProvideFactory.provide());
+      return ImmutableSet.<String>of(MainViewModel_HiltModules_KeyModule_ProvideFactory.provide());
     }
 
     @Override
@@ -424,12 +425,12 @@ public final class DaggerRoadGuardApp_HiltComponents_SingletonC {
 
     @Override
     public Map<String, javax.inject.Provider<ViewModel>> getHiltViewModelMap() {
-      return Collections.<String, javax.inject.Provider<ViewModel>>singletonMap("com.roadguard.app.ui.screens.MainViewModel", ((Provider) mainViewModelProvider));
+      return ImmutableMap.<String, javax.inject.Provider<ViewModel>>of("com.roadguard.app.ui.screens.MainViewModel", ((Provider) mainViewModelProvider));
     }
 
     @Override
     public Map<String, Object> getHiltViewModelAssistedMap() {
-      return Collections.<String, Object>emptyMap();
+      return ImmutableMap.<String, Object>of();
     }
 
     private static final class SwitchingProvider<T> implements Provider<T> {
@@ -553,7 +554,7 @@ public final class DaggerRoadGuardApp_HiltComponents_SingletonC {
 
     @Override
     public Set<Boolean> getDisableFragmentGetContextFix() {
-      return Collections.<Boolean>emptySet();
+      return ImmutableSet.<Boolean>of();
     }
 
     @Override

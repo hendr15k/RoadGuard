@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.roadguard.app-mergeDebugResources-62:/values-or/values-or.xml",
+            "outputFile": "com.roadguard.app-mergeDebugResources-67:/values-or/values-or.xml",
             "map": [
                 {
                     "source": "/root/.gradle/caches/transforms-3/f7275f4a9ef9365447da3668f3a500f6/transformed/jetified-ui-release/res/values-or/values-or.xml",

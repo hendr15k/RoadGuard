@@ -2,10 +2,13 @@ package com.roadguard.app.ui.screens
 
 import android.Manifest
 import android.content.Context
+import android.net.Uri
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -15,6 +18,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +39,7 @@ import com.google.accompanist.permissions.rememberPermissionState
 import com.roadguard.app.data.ml.MlDetectionAnalyzer
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.ui.components.SettingsBottomSheet
+import com.roadguard.app.ui.components.VideoPreview
 import com.roadguard.app.ui.theme.DangerRed
 import com.roadguard.app.ui.theme.SafeGreen
 import com.roadguard.app.ui.theme.WarningYellow
@@ -48,10 +54,21 @@ fun MainScreen(
     val context = LocalContext.current
 
     var showSettings by remember { mutableStateOf(false) }
+    var videoUri by remember { mutableStateOf<Uri?>(null) }
+    var showVideoPicker by remember { mutableStateOf(false) }
 
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val activeWarning by viewModel.activeWarning.collectAsState()
+
+    val videoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            videoUri = it
+            showVideoPicker = true
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (!cameraPermissionState.status.isGranted) {
@@ -66,41 +83,84 @@ fun MainScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        if (cameraPermissionState.status.isGranted) {
-            CameraPreview(
-                modifier = Modifier.fillMaxSize(),
-                onLaneUpdate = viewModel::updateLaneInfo,
-                onDistanceUpdate = viewModel::updateVehicleDistance
-            )
+        when {
+            showVideoPicker && videoUri != null -> {
+                VideoPreview(
+                    videoUri = videoUri!!,
+                    modifier = Modifier.fillMaxSize()
+                )
 
-            WarningOverlay(
-                laneInfo = laneInfo,
-                vehicleDistance = vehicleDistance,
-                modifier = Modifier.fillMaxSize()
-            )
+                WarningOverlay(
+                    laneInfo = laneInfo,
+                    vehicleDistance = vehicleDistance,
+                    modifier = Modifier.fillMaxSize()
+                )
 
-            StatusBar(
-                distance = vehicleDistance?.distanceMeters,
-                isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 48.dp)
-            )
+                StatusBar(
+                    distance = vehicleDistance?.distanceMeters,
+                    isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 48.dp)
+                )
 
-            FloatingActionButton(
-                onClick = { showSettings = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp),
-                containerColor = MaterialTheme.colorScheme.surface
-            ) {
-                Text("⚙", color = Color.White)
+                FloatingActionButton(
+                    onClick = { showVideoPicker = false },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(16.dp),
+                    containerColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Icon(Icons.Default.VideoLibrary, contentDescription = "Camera Mode", tint = Color.White)
+                }
             }
-        } else {
-            PermissionRequest(
-                onRequestPermission = { cameraPermissionState.launchPermissionRequest() },
-                modifier = Modifier.fillMaxSize()
-            )
+            cameraPermissionState.status.isGranted -> {
+                CameraPreview(
+                    modifier = Modifier.fillMaxSize(),
+                    onLaneUpdate = viewModel::updateLaneInfo,
+                    onDistanceUpdate = viewModel::updateVehicleDistance
+                )
+
+                WarningOverlay(
+                    laneInfo = laneInfo,
+                    vehicleDistance = vehicleDistance,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                StatusBar(
+                    distance = vehicleDistance?.distanceMeters,
+                    isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 48.dp)
+                )
+
+                FloatingActionButton(
+                    onClick = { videoPickerLauncher.launch("video/*") },
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(16.dp),
+                    containerColor = MaterialTheme.colorScheme.surface
+                ) {
+                    Icon(Icons.Default.VideoLibrary, contentDescription = "Video Mode", tint = Color.White)
+                }
+            }
+            else -> {
+                PermissionRequest(
+                    onRequestPermission = { cameraPermissionState.launchPermissionRequest() },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+
+        FloatingActionButton(
+            onClick = { showSettings = true },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            Text("⚙", color = Color.White)
         }
 
         if (showSettings) {

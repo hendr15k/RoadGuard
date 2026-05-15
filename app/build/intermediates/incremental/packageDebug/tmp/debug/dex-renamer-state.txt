@@ -1,8 +1,9 @@
-#Fri May 15 13:01:27 UTC 2026
+#Fri May 15 13:19:45 UTC 2026
 base.0=/root/RoadGuard/app/build/intermediates/dex/debug/mergeExtDexDebug/classes.dex
 base.1=/root/RoadGuard/app/build/intermediates/dex/debug/mergeProjectDexDebug/0/classes.dex
 base.10=/root/RoadGuard/app/build/intermediates/dex/debug/mergeProjectDexDebug/9/classes.dex
 base.11=/root/RoadGuard/app/build/intermediates/dex/debug/mergeExtDexDebug/classes2.dex
+base.12=/root/RoadGuard/app/build/intermediates/dex/debug/mergeExtDexDebug/classes3.dex
 base.2=/root/RoadGuard/app/build/intermediates/dex/debug/mergeProjectDexDebug/10/classes.dex
 base.3=/root/RoadGuard/app/build/intermediates/dex/debug/mergeProjectDexDebug/11/classes.dex
 base.4=/root/RoadGuard/app/build/intermediates/dex/debug/mergeProjectDexDebug/13/classes.dex
@@ -15,6 +16,7 @@ path.0=classes.dex
 path.1=0/classes.dex
 path.10=9/classes.dex
 path.11=classes2.dex
+path.12=classes3.dex
 path.2=10/classes.dex
 path.3=11/classes.dex
 path.4=13/classes.dex
@@ -27,6 +29,7 @@ renamed.0=classes.dex
 renamed.1=classes2.dex
 renamed.10=classes11.dex
 renamed.11=classes12.dex
+renamed.12=classes13.dex
 renamed.2=classes3.dex
 renamed.3=classes4.dex
 renamed.4=classes5.dex
