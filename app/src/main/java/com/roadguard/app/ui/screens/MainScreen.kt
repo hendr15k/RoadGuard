@@ -122,12 +122,9 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val mlAnalyzer = remember {
-        MlDetectionAnalyzer(
-            vehicleThreshold = 20f,
-            laneSensitivity = 0.5f
-        )
-    }
+    val mlAnalyzer = remember { MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f) }
+    val cameraProvider = remember { ProcessCameraProvider.getInstance(context) }
+    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
 
     LaunchedEffect(mlAnalyzer) {
         mlAnalyzer.laneInfo.collect { laneInfo ->
@@ -141,52 +138,39 @@ fun CameraPreview(
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(lifecycleOwner) {
+        val cameraProviderInstance = cameraProvider.get()
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .build()
+            .also { it.setAnalyzer(ContextCompat.getMainExecutor(context), mlAnalyzer) }
+
+        try {
+            cameraProviderInstance.unbindAll()
+            cameraProviderInstance.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                imageAnalysis
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         onDispose {
+            cameraProviderInstance.unbindAll()
             mlAnalyzer.close()
         }
     }
 
     AndroidView(
-        factory = { ctx ->
-            PreviewView(ctx).apply {
-                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-            }
-        },
-        modifier = modifier,
-        update = { previewView ->
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
-                val preview = Preview.Builder()
-                    .setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_16_9)
-                    .build()
-                    .also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                    .build()
-                    .also { it.setAnalyzer(ContextCompat.getMainExecutor(context), mlAnalyzer) }
-
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-                try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        imageAnalysis
-                    )
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }, ContextCompat.getMainExecutor(context))
-        }
+        factory = { previewView },
+        modifier = modifier
     )
 }
 
