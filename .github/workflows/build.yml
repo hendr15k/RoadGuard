@@ -67,7 +67,7 @@ jobs:
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
-          name: RoadGuard-${{ github.ref_name }}
+          name: RoadGuard-${{ github.run_id }}
           path: ./apk
 
       - name: Get Commit Hash
