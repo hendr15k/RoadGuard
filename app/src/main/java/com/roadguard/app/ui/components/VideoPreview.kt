@@ -1,5 +1,6 @@
 package com.roadguard.app.ui.components
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -29,7 +30,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import com.google.mlkit.vision.common.InputImage
 import com.roadguard.app.data.ml.VideoMlAnalyzer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,14 +42,11 @@ import kotlinx.coroutines.launch
 fun VideoPreview(
     videoUri: Uri,
     modifier: Modifier = Modifier,
-    videoAnalyzer: VideoMlAnalyzer? = null,
-    onLaneUpdate: ((com.roadguard.app.domain.model.LaneInfo) -> Unit)? = null,
-    onDistanceUpdate: ((com.roadguard.app.domain.model.VehicleDistance) -> Unit)? = null
+    videoAnalyzer: VideoMlAnalyzer? = null
 ) {
     val context = LocalContext.current
     var isPlaying by remember { mutableStateOf(true) }
     var frameProcessor by remember { mutableStateOf<Job?>(null) }
-    var retriever by remember { mutableStateOf<MediaMetadataRetriever?>(null) }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -61,18 +58,31 @@ fun VideoPreview(
     }
 
     DisposableEffect(Unit) {
-        retriever = MediaMetadataRetriever()
-        try {
-            retriever?.setDataSource(context, videoUri)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
         onDispose {
             frameProcessor?.cancel()
-            retriever?.release()
             exoPlayer.release()
             videoAnalyzer?.close()
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
+                if (playing) {
+                    if (frameProcessor == null && videoAnalyzer != null) {
+                        frameProcessor = startFrameProcessing(context, exoPlayer, videoAnalyzer)
+                    }
+                } else {
+                    frameProcessor?.cancel()
+                    frameProcessor = null
+                }
+            }
+        }
+        exoPlayer.addListener(listener)
+
+        onDispose {
+            exoPlayer.removeListener(listener)
         }
     }
 
@@ -89,21 +99,10 @@ fun VideoPreview(
 
         IconButton(
             onClick = {
-                isPlaying = !isPlaying
                 if (isPlaying) {
-                    exoPlayer.play()
-                    frameProcessor?.cancel()
-                    frameProcessor = null
-                } else {
                     exoPlayer.pause()
-                    if (frameProcessor == null && retriever != null && videoAnalyzer != null) {
-                        frameProcessor = startFrameProcessing(
-                            retriever!!,
-                            videoAnalyzer!!,
-                            onLaneUpdate,
-                            onDistanceUpdate
-                        )
-                    }
+                } else {
+                    exoPlayer.play()
                 }
             },
             modifier = Modifier
@@ -121,33 +120,59 @@ fun VideoPreview(
 }
 
 private fun startFrameProcessing(
-    retriever: MediaMetadataRetriever,
-    videoAnalyzer: VideoMlAnalyzer,
-    onLaneUpdate: ((com.roadguard.app.domain.model.LaneInfo) -> Unit)?,
-    onDistanceUpdate: ((com.roadguard.app.domain.model.VehicleDistance) -> Unit)?
+    context: Context,
+    exoPlayer: ExoPlayer,
+    videoAnalyzer: VideoMlAnalyzer
 ): Job {
     return CoroutineScope(Dispatchers.Main).launch {
-        var frameTime = 0L
-        val frameInterval = 200L
+        val retriever = MediaMetadataRetriever()
+        var fileDescriptorSet = false
+
+        val frameInterval = 300L
+        var lastProcessedPosition = -1L
 
         while (isActive) {
-            try {
-                val bitmap = retriever.getFrameAtTime(
-                    frameTime * 1000,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                )
-                bitmap?.let {
-                    val scaledBitmap = Bitmap.createScaledBitmap(it, 640, 360, true)
-                    videoAnalyzer.analyzeFrame(scaledBitmap, scaledBitmap.width, scaledBitmap.height)
-                    scaledBitmap.recycle()
-                    it.recycle()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            if (exoPlayer.isPlaying) {
+                val currentPos = exoPlayer.currentPosition
+                if (currentPos != lastProcessedPosition) {
+                    lastProcessedPosition = currentPos
 
-            frameTime += frameInterval
+                    if (!fileDescriptorSet) {
+                        try {
+                            val uri = exoPlayer.currentMediaItem?.localConfiguration?.uri
+                            if (uri != null) {
+                                val fileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
+                                fileDescriptor?.let {
+                                    retriever.setDataSource(it.fileDescriptor)
+                                    fileDescriptorSet = true
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    if (fileDescriptorSet) {
+                        try {
+                            val bitmap = retriever.getFrameAtTime(
+                                currentPos * 1000,
+                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                            )
+                            bitmap?.let {
+                                val scaledBitmap = Bitmap.createScaledBitmap(it, 640, 360, true)
+                                videoAnalyzer.analyzeFrame(scaledBitmap, scaledBitmap.width, scaledBitmap.height)
+                                scaledBitmap.recycle()
+                                it.recycle()
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
             delay(frameInterval)
         }
+
+        retriever.release()
     }
 }
