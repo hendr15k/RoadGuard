@@ -44,7 +44,7 @@ jobs:
           if [[ "${{ github.ref_name }}" == v* ]]; then
             echo "NAME=RoadGuard-${{ github.ref_name }}" >> $GITHUB_OUTPUT
           else
-            echo "NAME=RoadGuard-debug" >> $GITHUB_OUTPUT
+            echo "NAME=RoadGuard-${{ github.run_id }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Build Debug APK
@@ -59,7 +59,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/master'
     permissions:
       contents: write
 
@@ -70,10 +70,17 @@ jobs:
           name: RoadGuard-${{ github.ref_name }}
           path: ./apk
 
+      - name: Get Commit Hash
+        id: commit
+        run: echo "SHORT_SHA=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: build-${{ github.run_id }}
+          name: Build ${{ github.run_id }} (${{ steps.commit.outputs.SHORT_SHA }})
           files: ./apk/app-debug.apk
           generate_release_notes: true
+          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
