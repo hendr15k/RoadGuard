@@ -27,7 +27,16 @@ class TfliteModelRunner(private val context: Context) {
             val modelBuffer: java.nio.ByteBuffer = if (modelFile.exists()) {
                 java.nio.ByteBuffer.wrap(modelFile.readBytes())
             } else {
-                FileUtil.loadMappedFile(context, modelName)
+                try {
+                    FileUtil.loadMappedFile(context, modelName)
+                } catch (e: Exception) {
+                    val assetFd = context.assets.openFd(modelName)
+                    val inputStream = context.assets.open(modelName)
+                    val bytes = inputStream.readBytes()
+                    inputStream.close()
+                    assetFd.close()
+                    java.nio.ByteBuffer.wrap(bytes)
+                }
             }
             interpreter = Interpreter(modelBuffer)
         } catch (e: Exception) {
@@ -59,8 +68,8 @@ class TfliteModelRunner(private val context: Context) {
         interpreter.run(inputBuffer, outputBuffer)
         outputBuffer.rewind()
 
-        val height = outputShape[1]
-        val width = outputShape[2]
+        val height = outputShape[2]
+        val width = outputShape[3]
         val result = Array(height) { IntArray(width) }
 
         val floatBuffer = outputBuffer.asFloatBuffer()
@@ -160,24 +169,30 @@ class TfliteModelRunner(private val context: Context) {
         return inputBuffer
     }
 
+    @Suppress("DEPRECATION")
     private fun yuvToBitmap(yData: ByteArray, width: Int, height: Int): Bitmap {
-        val yuvBuffer = ByteBuffer.allocate(yData.size + width * height / 2)
-        yuvBuffer.put(yData)
-        yuvBuffer.rewind()
+        return try {
+            val yuvBuffer = ByteBuffer.allocate(yData.size + width * height / 2)
+            yuvBuffer.put(yData)
+            yuvBuffer.rewind()
 
-        val rs = RenderScript.create(context)
-        val yuvToRgb = ScriptIntrinsicYuvToRGB.create(rs, Element.U8_4(rs))
-        val yuvAllocation = Allocation.createSized(rs, Element.U8(rs), yData.size)
-        yuvAllocation.copyFrom(yData)
-        val rgbaAllocation = Allocation.createTyped(rs, android.renderscript.Type.Builder(rs, Element.RGBA_8888(rs))
-            .setX(width).setY(height).create())
-        yuvToRgb.setInput(yuvAllocation)
-        yuvToRgb.forEach(rgbaAllocation)
-        val pixels = IntArray(width * height)
-        rgbaAllocation.copyTo(pixels)
+            val rs = RenderScript.create(context)
+            val yuvToRgb = ScriptIntrinsicYuvToRGB.create(rs, Element.U8_4(rs))
+            val yuvAllocation = Allocation.createSized(rs, Element.U8(rs), yData.size)
+            yuvAllocation.copyFrom(yData)
+            val rgbaAllocation = Allocation.createTyped(rs, android.renderscript.Type.Builder(rs, Element.RGBA_8888(rs))
+                .setX(width).setY(height).create())
+            yuvToRgb.setInput(yuvAllocation)
+            yuvToRgb.forEach(rgbaAllocation)
+            val pixels = IntArray(width * height)
+            rgbaAllocation.copyTo(pixels)
 
-        rs.destroy()
-        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+            rs.destroy()
+            Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        }
     }
 
     private fun emptySegmentation(): Array<Array<IntArray>> {
