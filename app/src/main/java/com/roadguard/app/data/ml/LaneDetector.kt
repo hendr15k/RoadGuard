@@ -8,7 +8,6 @@ import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.math.tan
 
 class LaneDetector(
     private val sensitivity: Float = 0.5f
@@ -28,28 +27,12 @@ class LaneDetector(
         val confidence: Float
     )
 
-    private val gaussianKernel = arrayOf(
-        intArrayOf(1, 2, 1),
-        intArrayOf(2, 4, 2),
-        intArrayOf(1, 2, 1)
-    )
-    private val gaussianDivisor = 16
+    private val gaussKernel = intArrayOf(1, 2, 1, 2, 4, 2, 1, 2, 1)
+    private val gaussDiv = 16
 
-    private val sobelX = arrayOf(
-        intArrayOf(-1, 0, 1),
-        intArrayOf(-2, 0, 2),
-        intArrayOf(-1, 0, 1)
-    )
-    private val sobelY = arrayOf(
-        intArrayOf(-1, -2, -1),
-        intArrayOf(0, 0, 0),
-        intArrayOf(1, 2, 1)
-    )
-
-    private val cannyLowThreshold = 30
-    private val cannyHighThreshold = 100
-    private val houghThreshold = 20
-    private val minLineLength = 40f
+    private var lastLeftBaseX: Int? = null
+    private var lastRightBaseX: Int? = null
+    private var lastDrawInfo: MutableMap<String, Any>? = null
 
     fun detectLanes(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): LaneDetectionResult {
         val width = bitmap.width
@@ -57,23 +40,193 @@ class LaneDetector(
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        val grayscale = toGrayscale(pixels, width, height)
-        val blurred = applyGaussianBlur(grayscale, width, height)
-        val edges = cannyEdgeDetection(blurred, width, height)
+        val frame = IntArray(width * height)
+        for (i in pixels.indices) {
+            val r = Color.red(pixels[i])
+            val g = Color.green(pixels[i])
+            val b = Color.blue(pixels[i])
+            frame[i] = (0.299 * r + 0.587 * g + 0.114 * b).toInt().coerceIn(0, 255)
+        }
 
-        val roi = computeROI(width, height)
-        val maskedEdges = applyROIMask(edges, roi, width, height)
+        val blurred = gaussianBlur(frame, width, height)
 
-        val lines = probabilisticHoughLine(maskedEdges, width, height)
-        val (leftLines, rightLines) = classifyAndFilterLines(lines, width, height)
+        val warped = warpPerspective(blurred, width, height)
 
-        val leftLane = fitLaneLine(leftLines, width, height)
-        val rightLane = fitLaneLine(rightLines, width, height)
+        val binary = applyThreshold(warped, width, height)
 
-        val isDriftingLeft = checkDrifting(leftLane, width, isLeft = true)
-        val isDriftingRight = checkDrifting(rightLane, width, isLeft = false)
+        val hist = computeHistogram(binary, width, height)
 
-        val confidence = calculateConfidence(leftLane, rightLane, leftLines, rightLines, height)
+        val midX = width / 2
+        val leftBaseX: Int
+        val rightBaseX: Int
+
+        if (lastLeftBaseX != null) {
+            val leftNeg = (lastLeftBaseX!! - 100).coerceIn(0, midX - 1)
+            val leftPos = (lastLeftBaseX!! + 100).coerceIn(0, width - 1)
+            leftBaseX = argMax(hist, leftNeg, leftPos) + leftNeg
+            lastLeftBaseX = null
+        } else {
+            leftBaseX = argMax(hist, 0, midX)
+        }
+
+        if (lastRightBaseX != null) {
+            val rightNeg = (lastRightBaseX!! - 100).coerceIn(midX, 0)
+            val rightPos = (lastRightBaseX!! + 100).coerceIn(midX, width - 1)
+            rightBaseX = argMax(hist, rightNeg, rightPos) + rightNeg
+            lastRightBaseX = null
+        } else {
+            rightBaseX = argMax(hist, midX, width - 1)
+        }
+
+        val nWindows = 10
+        val windowHeight = height / nWindows
+        val margin = 60
+        val minPix = 30
+        val scaling = 15
+
+        val nonzero = mutableListOf<Int>()
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                if (binary[y * width + x] > 0) {
+                    nonzero.add(y * width + x)
+                }
+            }
+        }
+        val nonzeroy = nonzero.map { it / width }.toIntArray()
+        val nonzerox = nonzero.map { it % width }.toIntArray()
+
+        var currentLeftX = leftBaseX
+        var currentRightX = rightBaseX
+
+        val leftLaneInds = mutableListOf<IntArray>()
+        val rightLaneInds = mutableListOf<IntArray>()
+
+        for (iWindow in 0 until nWindows) {
+            val winYLow = height - (iWindow + 1) * windowHeight
+            val winYHigh = height - iWindow * windowHeight
+
+            val boxMargin = margin + iWindow * scaling
+            val winXLeftLow = currentLeftX - boxMargin
+            val winXLeftHigh = currentLeftX + boxMargin
+            val winXRightLow = currentRightX - boxMargin
+            val winXRightHigh = currentRightX + boxMargin
+
+            val leftIndices = mutableListOf<Int>()
+            val rightIndices = mutableListOf<Int>()
+
+            for (i in nonzeroy.indices) {
+                val y = nonzeroy[i]
+                val x = nonzerox[i]
+                if (y in winYLow until winYHigh) {
+                    if (x >= winXLeftLow && x < winXLeftHigh) {
+                        leftIndices.add(i)
+                    }
+                    if (x >= winXRightLow && x < winXRightHigh) {
+                        rightIndices.add(i)
+                    }
+                }
+            }
+
+            leftLaneInds.add(leftIndices.toIntArray())
+            rightLaneInds.add(rightIndices.toIntArray())
+
+            if (leftIndices.size > minPix) {
+                val meanX = leftIndices.map { nonzerox[it] }.average().toInt()
+                currentLeftX = meanX
+                if (iWindow == 0) lastLeftBaseX = currentLeftX
+            }
+            if (rightIndices.size > minPix) {
+                val meanX = rightIndices.map { nonzerox[it] }.average().toInt()
+                currentRightX = meanX
+                if (iWindow == 0) lastRightBaseX = currentRightX
+            }
+        }
+
+        val flatLeftIndices = leftLaneInds.flatMap { it.toList() }.distinct()
+        val flatRightIndices = rightLaneInds.flatMap { it.toList() }.distinct()
+
+        val leftXs = flatLeftIndices.map { nonzerox[it].toFloat() }
+        val leftYs = flatLeftIndices.map { nonzeroy[it].toFloat() }
+        val rightXs = flatRightIndices.map { nonzerox[it].toFloat() }
+        val rightYs = flatRightIndices.map { nonzeroy[it].toFloat() }
+
+        var canDraw = leftXs.size > 100 && rightXs.size > 100 && leftYs.size > 100 && rightYs.size > 100
+
+        var leftLane: LaneLine? = null
+        var rightLane: LaneLine? = null
+
+        if (canDraw) {
+            val leftFit = polyFit2D(leftYs.map { it.toInt() }.toIntArray(), leftXs.map { it.toInt() }.toIntArray())
+            val rightFit = polyFit2D(rightYs.map { it.toInt() }.toIntArray(), rightXs.map { it.toInt() }.toIntArray())
+
+            if (leftFit != null && rightFit != null) {
+                val plotY = (0 until height).map { it.toFloat() }
+                val leftFitX = plotY.map { y ->
+                    leftFit[0] * y * y + leftFit[1] * y + leftFit[2]
+                }
+                val rightFitX = plotY.map { y ->
+                    rightFit[0] * y * y + rightFit[1] * y + rightFit[2]
+                }
+
+                val midX = width / 2f
+
+                val leftXAtBottom = leftFitX.last()
+                val rightXAtBottom = rightFitX.last()
+
+                val plausibleLeft = leftXAtBottom > width * 0.05f && leftXAtBottom < width * 0.5f
+                val plausibleRight = rightXAtBottom < width * 0.95f && rightXAtBottom > width * 0.5f
+                val notCrossing = plotY.indices.all { leftFitX[it] <= rightFitX[it] }
+
+                if (plausibleLeft && plausibleRight && notCrossing) {
+                    val leftBottomX = leftFitX.last().coerceIn(0f, width.toFloat())
+                    val leftTopX = leftFitX.first().coerceIn(0f, width.toFloat())
+                    val rightBottomX = rightFitX.last().coerceIn(0f, width.toFloat())
+                    val rightTopX = rightFitX.first().coerceIn(0f, width.toFloat())
+
+                    val leftLen = sqrt((leftBottomX - leftTopX).pow(2) + height.toFloat().pow(2))
+                    val leftAngle = atan2(height.toFloat(), leftBottomX - leftTopX)
+                    val rightLen = sqrt((rightBottomX - rightTopX).pow(2) + height.toFloat().pow(2))
+                    val rightAngle = atan2(height.toFloat(), rightBottomX - rightTopX)
+
+                    leftLane = LaneLine(leftTopX, 0f, leftBottomX, height - 1f, leftAngle, leftLen)
+                    rightLane = LaneLine(rightTopX, 0f, rightBottomX, height - 1f, rightAngle, rightLen)
+                } else {
+                    canDraw = false
+                }
+            } else {
+                canDraw = false
+            }
+        }
+
+        if (!canDraw && lastDrawInfo != null) {
+            val lastLeft = lastDrawInfo!!["leftLane"] as? LaneLine
+            val lastRight = lastDrawInfo!!["rightLane"] as? LaneLine
+            leftLane = lastLeft
+            rightLane = lastRight
+        } else if (canDraw) {
+            val info = mutableMapOf<String, Any>()
+            if (leftLane != null) info["leftLane"] = leftLane!!
+            if (rightLane != null) info["rightLane"] = rightLane!!
+            lastDrawInfo = info
+        }
+
+        val driftThreshold = width * (0.15f - sensitivity * 0.1f)
+        val centerX = width / 2f
+
+        var isDriftingLeft = false
+        var isDriftingRight = false
+
+        if (leftLane != null) {
+            val leftXAtCar = (leftLane.x1 + leftLane.x2) / 2
+            if (leftXAtCar < centerX - driftThreshold) isDriftingLeft = true
+        }
+        if (rightLane != null) {
+            val rightXAtCar = (rightLane.x1 + rightLane.x2) / 2
+            if (rightXAtCar > centerX + driftThreshold) isDriftingRight = true
+        }
+
+        val totalPixels = flatLeftIndices.size + flatRightIndices.size
+        val confidence = (totalPixels.coerceIn(0, 500) / 500f).coerceIn(0.05f, 0.95f)
 
         return LaneDetectionResult(
             leftLane = leftLane,
@@ -85,371 +238,282 @@ class LaneDetector(
     }
 
     fun detectLanesFromYUV(yData: ByteArray, width: Int, height: Int): LaneDetectionResult {
-        val grayscale = yData.copyOf()
-
-        val blurred = applyGaussianBlur(grayscale, width, height)
-        val edges = cannyEdgeDetection(blurred, width, height)
-
-        val roi = computeROI(width, height)
-        val maskedEdges = applyROIMask(edges, roi, width, height)
-
-        val lines = probabilisticHoughLine(maskedEdges, width, height)
-        val (leftLines, rightLines) = classifyAndFilterLines(lines, width, height)
-
-        val leftLane = fitLaneLine(leftLines, width, height)
-        val rightLane = fitLaneLine(rightLines, width, height)
-
-        val isDriftingLeft = checkDrifting(leftLane, width, isLeft = true)
-        val isDriftingRight = checkDrifting(rightLane, width, isLeft = false)
-
-        val confidence = calculateConfidence(leftLane, rightLane, leftLines, rightLines, height)
-
-        return LaneDetectionResult(
-            leftLane = leftLane,
-            rightLane = rightLane,
-            isDriftingLeft = isDriftingLeft,
-            isDriftingRight = isDriftingRight,
-            confidence = confidence
-        )
+        val frame = IntArray(width * height) { yData[it].toInt() and 0xFF }
+        return detectLanesFromFrame(frame, width, height)
     }
 
-    private fun computeROI(width: Int, height: Int): IntArray {
-        val topY = (height * 0.45).toInt()
-        val bottomY = height
+    private fun detectLanesFromFrame(frame: IntArray, width: Int, height: Int): LaneDetectionResult {
+        val blurred = gaussianBlur(frame, width, height)
+        val warped = warpPerspective(blurred, width, height)
+        val binary = applyThreshold(warped, width, height)
+        val hist = computeHistogram(binary, width, height)
 
-        val topWidth = width * 0.15f
-        val bottomWidth = width * 0.6f
+        val midX = width / 2
+        val leftBaseX: Int
+        val rightBaseX: Int
 
-        val leftTopX = (width / 2f - topWidth).toInt()
-        val leftBottomX = (width / 2f - bottomWidth).toInt()
-        val rightTopX = (width / 2f + topWidth).toInt()
-        val rightBottomX = (width / 2f + bottomWidth).toInt()
+        if (lastLeftBaseX != null) {
+            val leftNeg = (lastLeftBaseX!! - 100).coerceIn(0, midX - 1)
+            val leftPos = (lastLeftBaseX!! + 100).coerceIn(0, width - 1)
+            leftBaseX = argMax(hist, leftNeg, leftPos) + leftNeg
+            lastLeftBaseX = null
+        } else {
+            leftBaseX = argMax(hist, 0, midX)
+        }
 
-        val roi = IntArray(width * height) { 0 }
-        for (y in topY until bottomY) {
-            val ratio = (y - topY).toFloat() / (bottomY - topY)
-            val leftEdge = (leftBottomX + ratio * (leftTopX - leftBottomX)).toInt()
-            val rightEdge = (rightBottomX + ratio * (rightTopX - rightBottomX)).toInt()
+        if (lastRightBaseX != null) {
+            val rightNeg = (lastRightBaseX!! - 100).coerceIn(midX, 0)
+            val rightPos = (lastRightBaseX!! + 100).coerceIn(midX, width - 1)
+            rightBaseX = argMax(hist, rightNeg, rightPos) + rightNeg
+            lastRightBaseX = null
+        } else {
+            rightBaseX = argMax(hist, midX, width - 1)
+        }
 
-            for (x in leftEdge until rightEdge) {
-                if (x in 0 until width) {
-                    roi[y * width + x] = 255
+        val nWindows = 10
+        val windowHeight = height / nWindows
+        val margin = 60
+        val minPix = 30
+        val scaling = 15
+
+        val nonzero = mutableListOf<Int>()
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                if (binary[y * width + x] > 0) {
+                    nonzero.add(y * width + x)
                 }
             }
         }
-        return roi
-    }
+        val nonzeroy = nonzero.map { it / width }.toIntArray()
+        val nonzerox = nonzero.map { it % width }.toIntArray()
 
-    private fun applyROIMask(edges: ByteArray, roi: IntArray, width: Int, height: Int): ByteArray {
-        val masked = ByteArray(width * height)
-        for (i in edges.indices) {
-            if (roi[i] > 0 && edges[i] > 0) {
-                masked[i] = edges[i]
+        var currentLeftX = leftBaseX
+        var currentRightX = rightBaseX
+
+        val leftLaneInds = mutableListOf<IntArray>()
+        val rightLaneInds = mutableListOf<IntArray>()
+
+        for (iWindow in 0 until nWindows) {
+            val winYLow = height - (iWindow + 1) * windowHeight
+            val winYHigh = height - iWindow * windowHeight
+            val boxMargin = margin + iWindow * scaling
+            val winXLeftLow = currentLeftX - boxMargin
+            val winXLeftHigh = currentLeftX + boxMargin
+            val winXRightLow = currentRightX - boxMargin
+            val winXRightHigh = currentRightX + boxMargin
+
+            val leftIndices = mutableListOf<Int>()
+            val rightIndices = mutableListOf<Int>()
+
+            for (i in nonzeroy.indices) {
+                val y = nonzeroy[i]
+                val x = nonzerox[i]
+                if (y in winYLow until winYHigh) {
+                    if (x >= winXLeftLow && x < winXLeftHigh) leftIndices.add(i)
+                    if (x >= winXRightLow && x < winXRightHigh) rightIndices.add(i)
+                }
+            }
+
+            leftLaneInds.add(leftIndices.toIntArray())
+            rightLaneInds.add(rightIndices.toIntArray())
+
+            if (leftIndices.size > minPix) {
+                currentLeftX = leftIndices.map { nonzerox[it] }.average().toInt()
+                if (iWindow == 0) lastLeftBaseX = currentLeftX
+            }
+            if (rightIndices.size > minPix) {
+                currentRightX = rightIndices.map { nonzerox[it] }.average().toInt()
+                if (iWindow == 0) lastRightBaseX = currentRightX
             }
         }
-        return masked
-    }
 
-    private fun toGrayscale(pixels: IntArray, width: Int, height: Int): ByteArray {
-        val grayscale = ByteArray(width * height)
-        for (i in pixels.indices) {
-            val r = Color.red(pixels[i])
-            val g = Color.green(pixels[i])
-            val b = Color.blue(pixels[i])
-            grayscale[i] = ((0.299 * r + 0.587 * g + 0.114 * b).toInt()).toByte()
+        val flatLeftIndices = leftLaneInds.flatMap { it.toList() }.distinct()
+        val flatRightIndices = rightLaneInds.flatMap { it.toList() }.distinct()
+
+        if (flatLeftIndices.size < 50 || flatRightIndices.size < 50) {
+            return lastDrawInfo?.let { info ->
+                val ll = info["leftLane"] as? LaneLine
+                val rl = info["rightLane"] as? LaneLine
+                LaneDetectionResult(ll, rl, false, false, 0.05f)
+            } ?: LaneDetectionResult(null, null, false, false, 0.05f)
         }
-        return grayscale
+
+        val leftXs = flatLeftIndices.map { nonzerox[it].toFloat() }
+        val leftYs = flatLeftIndices.map { nonzeroy[it].toFloat() }
+        val rightXs = flatRightIndices.map { nonzerox[it].toFloat() }
+        val rightYs = flatRightIndices.map { nonzeroy[it].toFloat() }
+
+        val leftFit = polyFit2D(leftYs.map { it.toInt() }.toIntArray(), leftXs.map { it.toInt() }.toIntArray())
+        val rightFit = polyFit2D(rightYs.map { it.toInt() }.toIntArray(), rightXs.map { it.toInt() }.toIntArray())
+
+        if (leftFit == null || rightFit == null) {
+            return LaneDetectionResult(null, null, false, false, 0.05f)
+        }
+
+        val plotY = (0 until height).map { it.toFloat() }
+        val leftFitX = plotY.map { leftFit[0] * it * it + leftFit[1] * it + leftFit[2] }
+        val rightFitX = plotY.map { rightFit[0] * it * it + rightFit[1] * it + rightFit[2] }
+
+        val notCrossing = plotY.indices.all { leftFitX[it] <= rightFitX[it] }
+        if (!notCrossing) {
+            return lastDrawInfo?.let { info ->
+                val ll = info["leftLane"] as? LaneLine
+                val rl = info["rightLane"] as? LaneLine
+                LaneDetectionResult(ll, rl, false, false, 0.05f)
+            } ?: LaneDetectionResult(null, null, false, false, 0.05f)
+        }
+
+        val leftBottomX = leftFitX.last().coerceIn(0f, width.toFloat())
+        val leftTopX = leftFitX.first().coerceIn(0f, width.toFloat())
+        val rightBottomX = rightFitX.last().coerceIn(0f, width.toFloat())
+        val rightTopX = rightFitX.first().coerceIn(0f, width.toFloat())
+
+        val leftLen = sqrt((leftBottomX - leftTopX).pow(2) + height.toFloat().pow(2))
+        val leftAngle = atan2(height.toFloat(), leftBottomX - leftTopX)
+        val rightLen = sqrt((rightBottomX - rightTopX).pow(2) + height.toFloat().pow(2))
+        val rightAngle = atan2(height.toFloat(), rightBottomX - rightTopX)
+
+        val leftLane = LaneLine(leftTopX, 0f, leftBottomX, height - 1f, leftAngle, leftLen)
+        val rightLane = LaneLine(rightTopX, 0f, rightBottomX, height - 1f, rightAngle, rightLen)
+
+        val driftThreshold = width * (0.15f - sensitivity * 0.1f)
+        val centerX = width / 2f
+
+        val isDriftingLeft = leftBottomX < centerX - driftThreshold
+        val isDriftingRight = rightBottomX > centerX + driftThreshold
+
+        val totalPixels = flatLeftIndices.size + flatRightIndices.size
+        val confidence = (totalPixels.coerceIn(0, 500) / 500f).coerceIn(0.05f, 0.95f)
+
+        val info = mutableMapOf<String, Any>()
+        info["leftLane"] = leftLane
+        info["rightLane"] = rightLane
+        lastDrawInfo = info
+
+        return LaneDetectionResult(leftLane, rightLane, isDriftingLeft, isDriftingRight, confidence)
     }
 
-    private fun applyGaussianBlur(image: ByteArray, width: Int, height: Int): ByteArray {
-        val blurred = ByteArray(width * height)
-
+    private fun gaussianBlur(image: IntArray, width: Int, height: Int): IntArray {
+        val result = IntArray(width * height)
         for (y in 1 until height - 1) {
             for (x in 1 until width - 1) {
                 var sum = 0
+                var ki = 0
                 for (ky in -1..1) {
                     for (kx in -1..1) {
-                        val pixel = image[(y + ky) * width + (x + kx)].toInt() and 0xFF
-                        sum += pixel * gaussianKernel[ky + 1][kx + 1]
+                        sum += image[(y + ky) * width + (x + kx)] * gaussKernel[ki]
+                        ki++
                     }
                 }
-                blurred[y * width + x] = (sum / gaussianDivisor).toByte()
+                result[y * width + x] = sum / gaussDiv
             }
         }
-        return blurred
+        return result
     }
 
-    private fun cannyEdgeDetection(grayscale: ByteArray, width: Int, height: Int): ByteArray {
-        val gradientMagnitude = IntArray(width * height)
-        val gradientDirection = FloatArray(width * height)
-
-        for (y in 1 until height - 1) {
-            for (x in 1 until width - 1) {
-                var gx = 0
-                var gy = 0
-
-                for (ky in -1..1) {
-                    for (kx in -1..1) {
-                        val pixel = grayscale[(y + ky) * width + (x + kx)].toInt() and 0xFF
-                        gx += pixel * sobelX[ky + 1][kx + 1]
-                        gy += pixel * sobelY[ky + 1][kx + 1]
-                    }
-                }
-
-                gradientMagnitude[y * width + x] = sqrt(gx.toDouble().pow(2) + gy.toDouble().pow(2)).toInt()
-                gradientDirection[y * width + x] = atan2(gy.toFloat(), gx.toFloat())
-            }
-        }
-
-        val edges = ByteArray(width * height)
-        for (y in 1 until height - 1) {
-            for (x in 1 until width - 1) {
-                val magnitude = gradientMagnitude[y * width + x]
-                val angle = gradientDirection[y * width + x]
-
-                val neighbor1: Int
-                val neighbor2: Int
-
-                val normalizedAngle = ((angle + Math.PI) % Math.PI).toFloat()
-
-                when {
-                    normalizedAngle < Math.PI / 8 || normalizedAngle > 7 * Math.PI / 8 -> {
-                        neighbor1 = gradientMagnitude[y * width + x - 1]
-                        neighbor2 = gradientMagnitude[y * width + x + 1]
-                    }
-                    normalizedAngle < 3 * Math.PI / 8 -> {
-                        neighbor1 = gradientMagnitude[(y - 1) * width + x + 1]
-                        neighbor2 = gradientMagnitude[(y + 1) * width + x - 1]
-                    }
-                    normalizedAngle < 5 * Math.PI / 8 -> {
-                        neighbor1 = gradientMagnitude[(y - 1) * width + x]
-                        neighbor2 = gradientMagnitude[(y + 1) * width + x]
-                    }
-                    else -> {
-                        neighbor1 = gradientMagnitude[(y - 1) * width + x - 1]
-                        neighbor2 = gradientMagnitude[(y + 1) * width + x + 1]
-                    }
-                }
-
-                if (magnitude > neighbor1 && magnitude > neighbor2 && magnitude > cannyLowThreshold) {
-                    if (magnitude > cannyHighThreshold) {
-                        edges[y * width + x] = 255.toByte()
-                    } else if (edges[(y - 1) * width + x - 1] == 255.toByte() ||
-                        edges[(y - 1) * width + x] == 255.toByte() ||
-                        edges[(y - 1) * width + x + 1] == 255.toByte() ||
-                        edges[y * width + x - 1] == 255.toByte() ||
-                        edges[y * width + x + 1] == 255.toByte() ||
-                        edges[(y + 1) * width + x - 1] == 255.toByte() ||
-                        edges[(y + 1) * width + x] == 255.toByte() ||
-                        edges[(y + 1) * width + x + 1] == 255.toByte()) {
-                        edges[y * width + x] = 255.toByte()
-                    }
-                }
-            }
-        }
-
-        return edges
-    }
-
-    private fun probabilisticHoughLine(edges: ByteArray, width: Int, height: Int): List<LaneLine> {
-        val maxRho = sqrt(width.toDouble().pow(2) + height.toDouble().pow(2)).toInt()
-        val numRho = 2 * maxRho
-        val numTheta = 180
-
-        val accumulator = Array(numRho) { IntArray(numTheta) { 0 } }
-
-        val cosTable = DoubleArray(numTheta) { cos(Math.toRadians(it.toDouble())) }
-        val sinTable = DoubleArray(numTheta) { sin(Math.toRadians(it.toDouble())) }
-
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                if (edges[y * width + x] > 0) {
-                    for (theta in 0 until numTheta) {
-                        val rho = (x * cosTable[theta] + y * sinTable[theta]).toInt() + maxRho
-                        if (rho in 0 until numRho) {
-                            accumulator[rho][theta]++
-                        }
-                    }
-                }
-            }
-        }
-
-        val lines = mutableListOf<LaneLine>()
-        val localMaxima = mutableSetOf<Pair<Int, Int>>()
-
-        val neighborhoodSize = 10
-
-        for (rho in accumulator.indices) {
-            for (theta in 0 until numTheta) {
-                if (accumulator[rho][theta] > houghThreshold) {
-                    var isLocalMax = true
-                    for (dr in -neighborhoodSize..neighborhoodSize) {
-                        for (dt in -5..5) {
-                            val nr = rho + dr
-                            val nt = theta + dt
-                            if (nr in 0 until numRho && nt in 0 until numTheta) {
-                                if (accumulator[nr][nt] > accumulator[rho][theta]) {
-                                    isLocalMax = false
-                                    break
-                                }
-                            }
-                        }
-                        if (!isLocalMax) break
-                    }
-
-                    if (isLocalMax && !localMaxima.contains(Pair(rho, theta))) {
-                        localMaxima.add(Pair(rho, theta))
-
-                        val r = rho - maxRho
-                        val rad = Math.toRadians(theta.toDouble())
-
-                        var x1 = 0.0
-                        var y1 = 0.0
-                        var x2 = 0.0
-                        var y2 = 0.0
-
-                        if (theta in 30..150) {
-                            x1 = ((r - (height * 0.5) * sin(rad)) / cos(rad))
-                            y1 = (height * 0.5).toDouble()
-                            x2 = x1 + (-height * sin(rad))
-                            y2 = y1 + (height * cos(rad))
-                        } else {
-                            y1 = ((r - (width * 0.5) * cos(rad)) / sin(rad))
-                            x1 = (width * 0.5).toDouble()
-                            y2 = y1 + (-width * cos(rad))
-                            x2 = x1 + (width * sin(rad))
-                        }
-
-                        x1 = x1.coerceIn(0.0, (width - 1).toDouble())
-                        y1 = y1.coerceIn(0.0, (height - 1).toDouble())
-                        x2 = x2.coerceIn(0.0, (width - 1).toDouble())
-                        y2 = y2.coerceIn(0.0, (height - 1).toDouble())
-
-                        val length = sqrt((x2 - x1).pow(2) + (y2 - y1).pow(2)).toFloat()
-                        if (length >= minLineLength) {
-                            val angle = atan2((y2 - y1).toFloat(), (x2 - x1).toFloat())
-                            lines.add(LaneLine(x1.toFloat(), y1.toFloat(), x2.toFloat(), y2.toFloat(), angle, length))
-                        }
-                    }
-                }
-            }
-        }
-
-        return lines
-    }
-
-    private fun classifyAndFilterLines(lines: List<LaneLine>, width: Int, height: Int): Pair<List<LaneLine>, List<LaneLine>> {
-        val centerX = width / 2f
-        val horizonY = height * 0.45f
-
-        val leftLines = mutableListOf<LaneLine>()
-        val rightLines = mutableListOf<LaneLine>()
-
-        for (line in lines) {
-            val lineCenterX = (line.x1 + line.x2) / 2
-            val lineCenterY = (line.y1 + line.y2) / 2
-            val lineAngle = abs(line.angle)
-
-            val isValidAngle = lineAngle > Math.PI / 6 && lineAngle < Math.PI * 5 / 6
-            val isBelowHorizon = lineCenterY > horizonY
-            val isLeftSide = lineCenterX < centerX
-            val isRightSide = lineCenterX >= centerX
-
-            val isSlopeCorrect = if (isLeftSide) {
-                line.angle < 0
-            } else {
-                line.angle > 0
-            }
-
-            if (isValidAngle && isBelowHorizon && isSlopeCorrect) {
-                if (isLeftSide) {
-                    leftLines.add(line)
-                } else if (isRightSide) {
-                    rightLines.add(line)
-                }
-            }
-        }
-
-        return Pair(leftLines.sortedByDescending { it.length }, rightLines.sortedByDescending { it.length })
-    }
-
-    private fun fitLaneLine(lines: List<LaneLine>, width: Int, height: Int): LaneLine? {
-        if (lines.isEmpty()) return null
-
-        if (lines.size == 1) return lines[0]
-
-        var sumX1 = 0f
-        var sumY1 = 0f
-        var sumX2 = 0f
-        var sumY2 = 0f
-        var totalWeight = 0f
-
-        for (line in lines) {
-            val weight = line.length
-            sumX1 += line.x1 * weight
-            sumY1 += line.y1 * weight
-            sumX2 += line.x2 * weight
-            sumY2 += line.y2 * weight
-            totalWeight += weight
-        }
-
-        if (totalWeight == 0f) return null
-
-        val avgX1 = sumX1 / totalWeight
-        val avgY1 = sumY1 / totalWeight
-        val avgX2 = sumX2 / totalWeight
-        val avgY2 = sumY2 / totalWeight
-
-        val bottomY = (height * 0.95).toFloat()
-        val topY = (height * 0.5).toFloat()
-
-        val angle = atan2(avgY2 - avgY1, avgX2 - avgX1)
-        val length = sqrt((avgX2 - avgX1).pow(2) + (avgY2 - avgY1).pow(2))
-
-        val extrapolatedX1 = avgX1 + (topY - avgY1) / tan(angle.toDouble())
-        val extrapolatedY1 = topY
-        val extrapolatedX2 = avgX2 + (bottomY - avgY2) / tan(angle.toDouble())
-        val extrapolatedY2 = bottomY
-
-        return LaneLine(
-            extrapolatedX1.toFloat(), extrapolatedY1,
-            extrapolatedX2.toFloat(), extrapolatedY2,
-            angle, length
+    private fun warpPerspective(src: IntArray, w: Int, h: Int): IntArray {
+        val dst = IntArray(w * h)
+        val srcPts = floatArrayOf(
+            w * 0.15f, h.toFloat(),
+            w * 0.45f, h * 0.6f,
+            w * 0.55f, h * 0.6f,
+            w * 0.85f, h.toFloat()
         )
-    }
+        val dstPts = floatArrayOf(
+            0f, h.toFloat(),
+            0f, 0f,
+            w.toFloat(), 0f,
+            w.toFloat(), h.toFloat()
+        )
 
-    private fun checkDrifting(lane: LaneLine?, width: Int, isLeft: Boolean): Boolean {
-        if (lane == null) return false
+        val matrix = android.graphics.Matrix()
+        matrix.setPolyToPoly(srcPts, 0, dstPts, 0, 4)
+        val m = FloatArray(9)
+        matrix.getValues(m)
 
-        val checkY = (width * 0.5f)
-        val laneXAtCheckY = lane.x1 + (lane.x2 - lane.x1) * (checkY - lane.y1) / (lane.y2 - lane.y1)
-
-        val centerX = width / 2f
-        val driftThreshold = width * (0.12f - sensitivity * 0.08f)
-
-        return if (isLeft) {
-            laneXAtCheckY < centerX - driftThreshold
-        } else {
-            laneXAtCheckY > centerX + driftThreshold
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val denom = m[6] * x + m[7] * y + m[8]
+                if (denom == 0f) continue
+                val srcX = ((m[0] * x + m[1] * y + m[2]) / denom).toInt()
+                val srcY = ((m[3] * x + m[4] * y + m[5]) / denom).toInt()
+                if (srcX in 0 until w && srcY in 0 until h) {
+                    dst[y * w + x] = src[srcY * w + srcX]
+                }
+            }
         }
+        return dst
     }
 
-    private fun calculateConfidence(
-        leftLane: LaneLine?,
-        rightLane: LaneLine?,
-        leftLines: List<LaneLine>,
-        rightLines: List<LaneLine>,
-        height: Int
-    ): Float {
-        if (leftLane == null && rightLane == null) return 0.05f
+    private fun applyThreshold(image: IntArray, width: Int, height: Int): IntArray {
+        val thresh = (100 * sensitivity).toInt().coerceIn(80, 180)
+        return IntArray(width * height) { if (image[it] > thresh) 255 else 0 }
+    }
 
-        val lineCount = leftLines.size + rightLines.size
-        val lineCountScore = (lineCount.coerceIn(0, 10) / 10f) * 0.3f
+    private fun computeHistogram(binary: IntArray, width: Int, height: Int): IntArray {
+        val hist = IntArray(width)
+        for (x in 0 until width) {
+            var sum = 0
+            for (y in height / 2 until height) {
+                sum += binary[y * width + x]
+            }
+            hist[x] = sum
+        }
+        return hist
+    }
 
-        val leftScore = leftLane?.length?.div(height) ?: 0f
-        val rightScore = rightLane?.length?.div(height) ?: 0f
-        val lengthScore = (leftScore + rightScore) * 0.7f
+    private fun argMax(arr: IntArray, start: Int, end: Int): Int {
+        var maxIdx = start
+        var maxVal = arr[start]
+        for (i in start + 1..end.coerceAtMost(arr.size - 1)) {
+            if (arr[i] > maxVal) {
+                maxVal = arr[i]
+                maxIdx = i
+            }
+        }
+        return maxIdx
+    }
 
-        return (lineCountScore + lengthScore).coerceIn(0f, 1f)
+    private fun polyFit2D(y: IntArray, x: IntArray): FloatArray? {
+        if (y.size < 3 || x.size < 3) return null
+        val n = y.size.coerceAtMost(x.size).toFloat()
+        var sumX = 0f; var sumX2 = 0f; var sumX3 = 0f; var sumX4 = 0f
+        var sumY = 0f; var sumXY = 0f; var sumX2Y = 0f
+
+        for (i in 0 until n.toInt()) {
+            val xi = x[i].toFloat()
+            val yi = y[i].toFloat()
+            val xi2 = xi * xi
+            val xi3 = xi2 * xi
+            val xi4 = xi3 * xi
+            sumX += xi; sumX2 += xi2; sumX3 += xi3; sumX4 += xi4
+            sumY += yi; sumXY += xi * yi; sumX2Y += xi2 * yi
+        }
+
+        val det = n * (sumX2 * sumX4 - sumX3 * sumX3) -
+                  sumX * (sumX * sumX4 - sumX2 * sumX3) +
+                  sumX2 * (sumX * sumX3 - sumX2 * sumX2)
+
+        if (abs(det) < 0.0001f) return null
+
+        val a = (sumY * (sumX2 * sumX4 - sumX3 * sumX3) -
+                sumX * (sumXY * sumX4 - sumX3 * sumX2Y) +
+                sumX2 * (sumXY * sumX3 - sumX2 * sumX2Y)) / det
+
+        val b = (n * (sumXY * sumX4 - sumX3 * sumX2Y) -
+                sumY * (sumX * sumX4 - sumX2 * sumX3) +
+                sumX2 * (sumX * sumX2Y - sumXY * sumX2)) / det
+
+        val c = (n * (sumX2 * sumX2Y - sumXY * sumX3) -
+                sumX * (sumX * sumX2Y - sumXY * sumX2) +
+                sumY * (sumX * sumX3 - sumX2 * sumX2)) / det
+
+        return floatArrayOf(a, b, c)
+    }
+
+    fun reset() {
+        lastLeftBaseX = null
+        lastRightBaseX = null
+        lastDrawInfo = null
     }
 }

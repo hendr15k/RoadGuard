@@ -103,7 +103,11 @@ MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /root/.gradle/cac
 MERGED from [androidx.cursoradapter:cursoradapter:1.0.0] /root/.gradle/caches/transforms-3/114af0f18577a17779c73406ae41fbb7/transformed/cursoradapter-1.0.0/AndroidManifest.xml:17:1-22:12
 MERGED from [androidx.startup:startup-runtime:1.1.1] /root/.gradle/caches/transforms-3/d25092eef4a2340e2147575a279be3a7/transformed/jetified-startup-runtime-1.1.1/AndroidManifest.xml:17:1-33:12
 MERGED from [androidx.tracing:tracing:1.0.0] /root/.gradle/caches/transforms-3/de03ddc79a4fa44360c8506bd438a9f9/transformed/jetified-tracing-1.0.0/AndroidManifest.xml:17:1-24:12
+MERGED from [org.tensorflow:tensorflow-lite-support:0.4.4] /root/.gradle/caches/transforms-3/32f2d0198e5d5d2c4a846a6ef8803b67/transformed/jetified-tensorflow-lite-support-0.4.4/AndroidManifest.xml:2:1-5:12
+MERGED from [org.tensorflow:tensorflow-lite:2.14.0] /root/.gradle/caches/transforms-3/b231623087e6915d4d9f2ffc2a1d6b0e/transformed/jetified-tensorflow-lite-2.14.0/AndroidManifest.xml:2:1-11:12
 MERGED from [com.google.dagger:dagger-lint-aar:2.50] /root/.gradle/caches/transforms-3/deac78ddffd22d73a83d1f80923b12cd/transformed/jetified-dagger-lint-aar-2.50/AndroidManifest.xml:16:1-19:12
+MERGED from [org.tensorflow:tensorflow-lite-support-api:0.4.4] /root/.gradle/caches/transforms-3/333e8e0df9232d9e1f61cd7891fb4019/transformed/jetified-tensorflow-lite-support-api-0.4.4/AndroidManifest.xml:2:1-5:12
+MERGED from [org.tensorflow:tensorflow-lite-api:2.14.0] /root/.gradle/caches/transforms-3/31d6d06e9688c9caddde97f821ba9ddc/transformed/jetified-tensorflow-lite-api-2.14.0/AndroidManifest.xml:2:1-11:12
 MERGED from [com.google.android.odml:image:1.0.0-beta1] /root/.gradle/caches/transforms-3/f3760f75d53bbc3e604558c35a84d7b1/transformed/jetified-image-1.0.0-beta1/AndroidManifest.xml:2:1-9:12
 	package
 		INJECTED from /root/RoadGuard/app/src/main/AndroidManifest.xml
@@ -170,6 +174,10 @@ MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /root/.gradle/cac
 MERGED from [androidx.profileinstaller:profileinstaller:1.3.0] /root/.gradle/caches/transforms-3/e6c4965728fa472f52b8b24165829d5a/transformed/jetified-profileinstaller-1.3.0/AndroidManifest.xml:23:5-53:19
 MERGED from [androidx.startup:startup-runtime:1.1.1] /root/.gradle/caches/transforms-3/d25092eef4a2340e2147575a279be3a7/transformed/jetified-startup-runtime-1.1.1/AndroidManifest.xml:25:5-31:19
 MERGED from [androidx.startup:startup-runtime:1.1.1] /root/.gradle/caches/transforms-3/d25092eef4a2340e2147575a279be3a7/transformed/jetified-startup-runtime-1.1.1/AndroidManifest.xml:25:5-31:19
+MERGED from [org.tensorflow:tensorflow-lite:2.14.0] /root/.gradle/caches/transforms-3/b231623087e6915d4d9f2ffc2a1d6b0e/transformed/jetified-tensorflow-lite-2.14.0/AndroidManifest.xml:9:5-20
+MERGED from [org.tensorflow:tensorflow-lite:2.14.0] /root/.gradle/caches/transforms-3/b231623087e6915d4d9f2ffc2a1d6b0e/transformed/jetified-tensorflow-lite-2.14.0/AndroidManifest.xml:9:5-20
+MERGED from [org.tensorflow:tensorflow-lite-api:2.14.0] /root/.gradle/caches/transforms-3/31d6d06e9688c9caddde97f821ba9ddc/transformed/jetified-tensorflow-lite-api-2.14.0/AndroidManifest.xml:9:5-20
+MERGED from [org.tensorflow:tensorflow-lite-api:2.14.0] /root/.gradle/caches/transforms-3/31d6d06e9688c9caddde97f821ba9ddc/transformed/jetified-tensorflow-lite-api-2.14.0/AndroidManifest.xml:9:5-20
 MERGED from [com.google.android.odml:image:1.0.0-beta1] /root/.gradle/caches/transforms-3/f3760f75d53bbc3e604558c35a84d7b1/transformed/jetified-image-1.0.0-beta1/AndroidManifest.xml:7:5-20
 MERGED from [com.google.android.odml:image:1.0.0-beta1] /root/.gradle/caches/transforms-3/f3760f75d53bbc3e604558c35a84d7b1/transformed/jetified-image-1.0.0-beta1/AndroidManifest.xml:7:5-20
 	android:extractNativeLibs
@@ -412,8 +420,16 @@ MERGED from [androidx.startup:startup-runtime:1.1.1] /root/.gradle/caches/transf
 MERGED from [androidx.startup:startup-runtime:1.1.1] /root/.gradle/caches/transforms-3/d25092eef4a2340e2147575a279be3a7/transformed/jetified-startup-runtime-1.1.1/AndroidManifest.xml:21:5-23:41
 MERGED from [androidx.tracing:tracing:1.0.0] /root/.gradle/caches/transforms-3/de03ddc79a4fa44360c8506bd438a9f9/transformed/jetified-tracing-1.0.0/AndroidManifest.xml:20:5-22:41
 MERGED from [androidx.tracing:tracing:1.0.0] /root/.gradle/caches/transforms-3/de03ddc79a4fa44360c8506bd438a9f9/transformed/jetified-tracing-1.0.0/AndroidManifest.xml:20:5-22:41
+MERGED from [org.tensorflow:tensorflow-lite-support:0.4.4] /root/.gradle/caches/transforms-3/32f2d0198e5d5d2c4a846a6ef8803b67/transformed/jetified-tensorflow-lite-support-0.4.4/AndroidManifest.xml:4:3-71
+MERGED from [org.tensorflow:tensorflow-lite-support:0.4.4] /root/.gradle/caches/transforms-3/32f2d0198e5d5d2c4a846a6ef8803b67/transformed/jetified-tensorflow-lite-support-0.4.4/AndroidManifest.xml:4:3-71
+MERGED from [org.tensorflow:tensorflow-lite:2.14.0] /root/.gradle/caches/transforms-3/b231623087e6915d4d9f2ffc2a1d6b0e/transformed/jetified-tensorflow-lite-2.14.0/AndroidManifest.xml:6:5-7:38
+MERGED from [org.tensorflow:tensorflow-lite:2.14.0] /root/.gradle/caches/transforms-3/b231623087e6915d4d9f2ffc2a1d6b0e/transformed/jetified-tensorflow-lite-2.14.0/AndroidManifest.xml:6:5-7:38
 MERGED from [com.google.dagger:dagger-lint-aar:2.50] /root/.gradle/caches/transforms-3/deac78ddffd22d73a83d1f80923b12cd/transformed/jetified-dagger-lint-aar-2.50/AndroidManifest.xml:18:3-42
 MERGED from [com.google.dagger:dagger-lint-aar:2.50] /root/.gradle/caches/transforms-3/deac78ddffd22d73a83d1f80923b12cd/transformed/jetified-dagger-lint-aar-2.50/AndroidManifest.xml:18:3-42
+MERGED from [org.tensorflow:tensorflow-lite-support-api:0.4.4] /root/.gradle/caches/transforms-3/333e8e0df9232d9e1f61cd7891fb4019/transformed/jetified-tensorflow-lite-support-api-0.4.4/AndroidManifest.xml:4:3-71
+MERGED from [org.tensorflow:tensorflow-lite-support-api:0.4.4] /root/.gradle/caches/transforms-3/333e8e0df9232d9e1f61cd7891fb4019/transformed/jetified-tensorflow-lite-support-api-0.4.4/AndroidManifest.xml:4:3-71
+MERGED from [org.tensorflow:tensorflow-lite-api:2.14.0] /root/.gradle/caches/transforms-3/31d6d06e9688c9caddde97f821ba9ddc/transformed/jetified-tensorflow-lite-api-2.14.0/AndroidManifest.xml:6:5-7:38
+MERGED from [org.tensorflow:tensorflow-lite-api:2.14.0] /root/.gradle/caches/transforms-3/31d6d06e9688c9caddde97f821ba9ddc/transformed/jetified-tensorflow-lite-api-2.14.0/AndroidManifest.xml:6:5-7:38
 MERGED from [com.google.android.odml:image:1.0.0-beta1] /root/.gradle/caches/transforms-3/f3760f75d53bbc3e604558c35a84d7b1/transformed/jetified-image-1.0.0-beta1/AndroidManifest.xml:5:5-44
 MERGED from [com.google.android.odml:image:1.0.0-beta1] /root/.gradle/caches/transforms-3/f3760f75d53bbc3e604558c35a84d7b1/transformed/jetified-image-1.0.0-beta1/AndroidManifest.xml:5:5-44
 	android:targetSdkVersion

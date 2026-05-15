@@ -57,7 +57,8 @@ fun MainScreen(
     var showSettings by remember { mutableStateOf(false) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPicker by remember { mutableStateOf(false) }
-    val videoAnalyzer = remember { VideoMlAnalyzer() }
+    val appContext = context.applicationContext
+    val videoAnalyzer = remember { VideoMlAnalyzer(appContext = appContext) }
 
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
@@ -133,7 +134,8 @@ fun MainScreen(
                 CameraPreview(
                     modifier = Modifier.fillMaxSize(),
                     onLaneUpdate = viewModel::updateLaneInfo,
-                    onDistanceUpdate = viewModel::updateVehicleDistance
+                    onDistanceUpdate = viewModel::updateVehicleDistance,
+                    appContext = appContext
                 )
 
                 WarningOverlay(
@@ -192,12 +194,13 @@ fun MainScreen(
 fun CameraPreview(
     modifier: Modifier = Modifier,
     onLaneUpdate: (com.roadguard.app.domain.model.LaneInfo) -> Unit,
-    onDistanceUpdate: (com.roadguard.app.domain.model.VehicleDistance) -> Unit
+    onDistanceUpdate: (com.roadguard.app.domain.model.VehicleDistance) -> Unit,
+    appContext: Context? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val mlAnalyzer = remember { MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f) }
+    val mlAnalyzer = remember { MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext) }
     val cameraProvider = remember { ProcessCameraProvider.getInstance(context) }
     val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
 

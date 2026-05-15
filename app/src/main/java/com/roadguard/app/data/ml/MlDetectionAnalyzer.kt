@@ -1,6 +1,7 @@
 package com.roadguard.app.data.ml
 
 import android.annotation.SuppressLint
+import android.content.Context
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mlkit.vision.common.InputImage
@@ -15,7 +16,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class MlDetectionAnalyzer(
     private val vehicleThreshold: Float = 20f,
-    private val laneSensitivity: Float = 0.5f
+    private val laneSensitivity: Float = 0.5f,
+    private val appContext: Context? = null
 ) : ImageAnalysis.Analyzer {
 
     private val objectDetector: ObjectDetector = ObjectDetection.getClient(
@@ -26,6 +28,7 @@ class MlDetectionAnalyzer(
     )
 
     private val laneDetector = LaneDetector(laneSensitivity)
+    private var tfliteRunner: TfliteModelRunner? = null
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -34,7 +37,18 @@ class MlDetectionAnalyzer(
     val vehicleDistance: StateFlow<VehicleDistance?> = _vehicleDistance.asStateFlow()
 
     private var lastProcessTime = 0L
-    private val processInterval = 200L
+    private val processInterval = 250L
+
+    init {
+        appContext?.let { ctx ->
+            try {
+                tfliteRunner = TfliteModelRunner(ctx)
+                tfliteRunner?.loadModel()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 
     @SuppressLint("UnsafeOptInUsageError")
     override fun analyze(imageProxy: ImageProxy) {
@@ -56,12 +70,36 @@ class MlDetectionAnalyzer(
             val yData = ByteArray(yBuffer.remaining())
             yBuffer.get(yData)
 
-            val result = laneDetector.detectLanesFromYUV(yData, imageProxy.width, imageProxy.height)
+            val swResult = laneDetector.detectLanesFromYUV(yData, imageProxy.width, imageProxy.height)
+
+            var tfliteDriftL = false
+            var tfliteDriftR = false
+            var tfliteConf = 0.05f
+
+            if (tfliteRunner?.isLoaded() == true) {
+                try {
+                    val segmentation = tfliteRunner!!.runSegmentationYUV(yData, imageProxy.width, imageProxy.height)
+                    val segResult = tfliteRunner!!.detectLanesFromSegmentation(
+                        segmentation[0],
+                        imageProxy.width,
+                        imageProxy.height
+                    )
+                    tfliteDriftL = segResult.isDriftingLeft
+                    tfliteDriftR = segResult.isDriftingRight
+                    tfliteConf = segResult.confidence
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            val finalIsDriftingLeft = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
+            val finalIsDriftingRight = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
+            val finalConfidence = maxOf(swResult.confidence, tfliteConf)
 
             _laneInfo.value = LaneInfo(
-                isDriftingLeft = result.isDriftingLeft,
-                isDriftingRight = result.isDriftingRight,
-                confidence = result.confidence
+                isDriftingLeft = finalIsDriftingLeft,
+                isDriftingRight = finalIsDriftingRight,
+                confidence = finalConfidence
             )
 
             detectVehicles(inputImage)
@@ -87,12 +125,7 @@ class MlDetectionAnalyzer(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>
     ) {
         val vehicleCategories = setOf(
-            "Vehicle",
-            "Car",
-            "Truck",
-            "Bus",
-            "Motorcycle",
-            "Bicycle"
+            "Vehicle", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"
         )
 
         var minDistance = Float.MAX_VALUE
@@ -130,5 +163,6 @@ class MlDetectionAnalyzer(
 
     fun close() {
         objectDetector.close()
+        tfliteRunner?.close()
     }
 }

@@ -1,5 +1,6 @@
 package com.roadguard.app.data.ml
 
+import android.content.Context
 import android.graphics.Bitmap
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.objects.ObjectDetection
@@ -13,7 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class VideoMlAnalyzer(
     private val vehicleThreshold: Float = 20f,
-    private val laneSensitivity: Float = 0.5f
+    private val laneSensitivity: Float = 0.5f,
+    private val appContext: Context? = null
 ) {
     private val objectDetector: ObjectDetector = ObjectDetection.getClient(
         ObjectDetectorOptions.Builder()
@@ -23,6 +25,7 @@ class VideoMlAnalyzer(
     )
 
     private val laneDetector = LaneDetector(laneSensitivity)
+    private var tfliteRunner: TfliteModelRunner? = null
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -31,7 +34,18 @@ class VideoMlAnalyzer(
     val vehicleDistance: StateFlow<VehicleDistance?> = _vehicleDistance.asStateFlow()
 
     private var lastProcessTime = 0L
-    private val processInterval = 250L
+    private val processInterval = 300L
+
+    init {
+        appContext?.let { ctx ->
+            try {
+                tfliteRunner = TfliteModelRunner(ctx)
+                tfliteRunner?.loadModel()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 
     fun analyzeFrame(bitmap: Bitmap, width: Int, height: Int) {
         val currentTime = System.currentTimeMillis()
@@ -39,12 +53,34 @@ class VideoMlAnalyzer(
         lastProcessTime = currentTime
 
         try {
-            val laneResult = laneDetector.detectLanes(bitmap, width, height)
+            val swResult = laneDetector.detectLanes(bitmap, width, height)
+
+            var tfliteDriftL = false
+            var tfliteDriftR = false
+            var tfliteConf = 0.05f
+
+            if (tfliteRunner?.isLoaded() == true) {
+                try {
+                    val segmentation = tfliteRunner!!.runSegmentation(bitmap)
+                    val segResult = tfliteRunner!!.detectLanesFromSegmentation(
+                        segmentation[0], width, height
+                    )
+                    tfliteDriftL = segResult.isDriftingLeft
+                    tfliteDriftR = segResult.isDriftingRight
+                    tfliteConf = segResult.confidence
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            val finalIsDriftingLeft = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
+            val finalIsDriftingRight = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
+            val finalConfidence = maxOf(swResult.confidence, tfliteConf)
 
             _laneInfo.value = LaneInfo(
-                isDriftingLeft = laneResult.isDriftingLeft,
-                isDriftingRight = laneResult.isDriftingRight,
-                confidence = laneResult.confidence
+                isDriftingLeft = finalIsDriftingLeft,
+                isDriftingRight = finalIsDriftingRight,
+                confidence = finalConfidence
             )
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
@@ -68,12 +104,7 @@ class VideoMlAnalyzer(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>
     ) {
         val vehicleCategories = setOf(
-            "Vehicle",
-            "Car",
-            "Truck",
-            "Bus",
-            "Motorcycle",
-            "Bicycle"
+            "Vehicle", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"
         )
 
         var minDistance = Float.MAX_VALUE
@@ -111,5 +142,6 @@ class VideoMlAnalyzer(
 
     fun close() {
         objectDetector.close()
+        tfliteRunner?.close()
     }
 }
