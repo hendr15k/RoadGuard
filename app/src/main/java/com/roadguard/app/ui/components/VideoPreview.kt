@@ -166,9 +166,10 @@ private fun startFrameProcessing(
                         )
                         if (bitmap != null) {
                             val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 640, 360, true)
-                            videoAnalyzer.analyzeFrame(scaledBitmap, scaledBitmap.width, scaledBitmap.height)
-                            scaledBitmap.recycle()
                             bitmap.recycle()
+                            val argbBitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            scaledBitmap.recycle()
+                            videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.width, argbBitmap.height)
                         }
                     } catch (e: Exception) {
                         android.util.Log.e("VideoPreview", "Frame extraction failed", e)

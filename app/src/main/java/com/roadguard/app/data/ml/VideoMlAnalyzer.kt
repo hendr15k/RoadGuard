@@ -84,19 +84,21 @@ class VideoMlAnalyzer(
             )
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
-            detectVehicles(inputImage)
+            detectVehicles(inputImage, bitmap)
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    private fun detectVehicles(inputImage: InputImage) {
+    private fun detectVehicles(inputImage: InputImage, bitmapToRecycle: Bitmap) {
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
                 processVehicleResult(detectedObjects)
+                bitmapToRecycle.recycle()
             }
             .addOnFailureListener {
                 _vehicleDistance.value = null
+                bitmapToRecycle.recycle()
             }
     }
 
