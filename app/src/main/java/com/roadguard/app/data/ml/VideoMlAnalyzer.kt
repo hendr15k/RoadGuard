@@ -77,6 +77,15 @@ class VideoMlAnalyzer(
             val finalIsDriftingRight = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
             val finalConfidence = maxOf(swResult.confidence, tfliteConf)
 
+            val leftMark = if (swResult.leftLane != null) "L" else "-"
+            val rightMark = if (swResult.rightLane != null) "R" else "-"
+            android.util.Log.d("LaneTracking",
+                "sw=%.2f tf=%.2f cf=%.2f dL=%b dR=%b lanes=%s".format(
+                    swResult.confidence, tfliteConf, finalConfidence,
+                    finalIsDriftingLeft, finalIsDriftingRight, leftMark + rightMark
+                )
+            )
+
             _laneInfo.value = LaneInfo(
                 isDriftingLeft = finalIsDriftingLeft,
                 isDriftingRight = finalIsDriftingRight,
