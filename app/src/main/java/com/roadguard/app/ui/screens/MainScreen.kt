@@ -2,12 +2,12 @@ package com.roadguard.app.ui.screens
 
 import android.Manifest
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.SoundPool
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Size
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -31,12 +31,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
+import com.roadguard.app.data.ml.MlDetectionAnalyzer
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.ui.components.SettingsBottomSheet
 import com.roadguard.app.ui.theme.DangerRed
 import com.roadguard.app.ui.theme.SafeGreen
 import com.roadguard.app.ui.theme.WarningYellow
-import kotlin.random.Random
+import com.roadguard.app.ui.theme.DarkBackground
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
@@ -121,6 +122,31 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    val mlAnalyzer = remember {
+        MlDetectionAnalyzer(
+            vehicleThreshold = 20f,
+            laneSensitivity = 0.5f
+        )
+    }
+
+    LaunchedEffect(mlAnalyzer) {
+        mlAnalyzer.laneInfo.collect { laneInfo ->
+            laneInfo?.let { onLaneUpdate(it) }
+        }
+    }
+
+    LaunchedEffect(mlAnalyzer) {
+        mlAnalyzer.vehicleDistance.collect { distance ->
+            distance?.let { onDistanceUpdate(it) }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            mlAnalyzer.close()
+        }
+    }
+
     AndroidView(
         factory = { ctx ->
             PreviewView(ctx).apply {
@@ -136,6 +162,13 @@ fun CameraPreview(
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(Size(1280, 720))
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .build()
+                    .also { it.setAnalyzer(ContextCompat.getMainExecutor(context), mlAnalyzer) }
+
                 val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
 
                 try {
@@ -143,40 +176,14 @@ fun CameraPreview(
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
-                        preview
+                        preview,
+                        imageAnalysis
                     )
-
-                    simulateDetection(onLaneUpdate, onDistanceUpdate)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }, ContextCompat.getMainExecutor(context))
         }
-    )
-}
-
-private fun simulateDetection(
-    onLaneUpdate: (com.roadguard.app.domain.model.LaneInfo) -> Unit,
-    onDistanceUpdate: (com.roadguard.app.domain.model.VehicleDistance) -> Unit
-) {
-    val random = Random.nextFloat()
-    val isDrifting = random > 0.7f
-    val driftDirection = if (random > 0.85f) "left" else if (random > 0.7f) "right" else null
-
-    onLaneUpdate(
-        com.roadguard.app.domain.model.LaneInfo(
-            isDriftingLeft = driftDirection == "left",
-            isDriftingRight = driftDirection == "right",
-            confidence = 0.8f
-        )
-    )
-
-    val distance = 10f + Random.nextFloat() * 40f
-    onDistanceUpdate(
-        com.roadguard.app.domain.model.VehicleDistance(
-            distanceMeters = distance,
-            isTooClose = distance < 20f
-        )
     )
 }
 
