@@ -147,7 +147,6 @@ private fun startFrameProcessing(
                         if (uri != null) {
                             retriever.setDataSource(context, uri)
                             retrieverInitialized = true
-                            android.util.Log.d("VideoPreview", "Retriever initialized with URI: $uri")
                         }
                     } catch (e: Exception) {
                         android.util.Log.e("VideoPreview", "Failed to init retriever", e)
@@ -176,7 +175,7 @@ private fun startFrameProcessing(
                     }
                 }
             }
-            delay(100L)
+            delay(300L)
         }
 
         try {
