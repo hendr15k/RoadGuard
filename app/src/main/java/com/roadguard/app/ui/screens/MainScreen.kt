@@ -116,8 +116,8 @@ fun MainScreen(
                 )
 
                 StatusBar(
-                    distance = vehicleDistance?.distanceMeters,
-                    isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false,
+                    laneInfo = laneInfo,
+                    vehicleDistance = vehicleDistance,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 48.dp)
@@ -148,8 +148,8 @@ fun MainScreen(
                 )
 
                 StatusBar(
-                    distance = vehicleDistance?.distanceMeters,
-                    isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false,
+                    laneInfo = laneInfo,
+                    vehicleDistance = vehicleDistance,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 48.dp)
@@ -180,7 +180,7 @@ fun MainScreen(
                 .padding(16.dp),
             containerColor = MaterialTheme.colorScheme.surface
         ) {
-            Text("⚙", color = Color.White)
+            Text("", color = Color.White)
         }
 
         if (showSettings) {
@@ -286,6 +286,8 @@ fun WarningOverlay(
         vehicleDistance?.let { dist ->
             if (dist.isTooClose) {
                 ForwardCollisionWarning(
+                    distance = dist.distanceMeters,
+                    ttc = dist.timeToCollision,
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
@@ -297,7 +299,7 @@ fun WarningOverlay(
 fun LaneWarningIndicator(isLeft: Boolean, modifier: Modifier = Modifier) {
     Canvas(
         modifier = modifier
-            .size(60.dp)
+            .size(80.dp)
             .padding(8.dp)
     ) {
         drawCircle(
@@ -310,66 +312,144 @@ fun LaneWarningIndicator(isLeft: Boolean, modifier: Modifier = Modifier) {
             color = WarningYellow,
             start = Offset(arrowX, size.height * 0.2f),
             end = Offset(arrowX, size.height * 0.8f),
-            strokeWidth = 6f
+            strokeWidth = 8f
         )
         drawLine(
             color = WarningYellow,
             start = Offset(arrowX, size.height * 0.2f),
-            end = Offset(if (isLeft) arrowX + 15f else arrowX - 15f, size.height * 0.4f),
-            strokeWidth = 6f
+            end = Offset(if (isLeft) arrowX + 20f else arrowX - 20f, size.height * 0.4f),
+            strokeWidth = 8f
+        )
+        drawLine(
+            color = WarningYellow,
+            start = Offset(arrowX, size.height * 0.8f),
+            end = Offset(if (isLeft) arrowX + 20f else arrowX - 20f, size.height * 0.6f),
+            strokeWidth = 8f
         )
     }
 }
 
 @Composable
-fun ForwardCollisionWarning(modifier: Modifier = Modifier) {
+fun ForwardCollisionWarning(
+    distance: Float,
+    ttc: Float,
+    modifier: Modifier = Modifier
+) {
     Column(
-        modifier = modifier,
+        modifier = modifier
+            .background(
+                color = DangerRed.copy(alpha = 0.9f),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "⚠️ COLLISION WARNING",
-            color = DangerRed,
-            style = MaterialTheme.typography.headlineMedium
+            text = "COLLISION WARNING",
+            color = Color.White,
+            style = MaterialTheme.typography.headlineSmall
         )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "%.1f m".format(distance),
+            color = Color.White,
+            style = MaterialTheme.typography.titleLarge
+        )
+        if (ttc < 60f) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "TTC: %.1f s".format(ttc),
+                color = Color.White,
+                style = MaterialTheme.typography.bodyLarge
+            )
+        }
     }
 }
 
 @Composable
 fun StatusBar(
-    distance: Float?,
-    isLaneOk: Boolean,
+    laneInfo: com.roadguard.app.domain.model.LaneInfo?,
+    vehicleDistance: com.roadguard.app.domain.model.VehicleDistance?,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier
             .background(
-                color = Color.Black.copy(alpha = 0.7f),
+                color = Color.Black.copy(alpha = 0.75f),
                 shape = RoundedCornerShape(12.dp)
             )
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
+        // Lane Status
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("LANE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+            val isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false
             Text(
-                if (isLaneOk) "OK" else "WARNING",
-                color = if (isLaneOk) SafeGreen else WarningYellow
+                if (isLaneOk) "OK" else "WARN",
+                color = if (isLaneOk) SafeGreen else WarningYellow,
+                style = MaterialTheme.typography.titleSmall
             )
         }
 
-        Column {
-            Text("DISTANCE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+        // Lane visibility
+        if (laneInfo != null) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("LANES", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(
+                    "${if (laneInfo.leftLaneVisible) "L" else "-"}${if (laneInfo.rightLaneVisible) "R" else "-"}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall
+                )
+            }
+        }
+
+        // Center offset
+        if (laneInfo != null && kotlin.math.abs(laneInfo.centerOffset) > 5f) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("OFFSET", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(
+                    "%.0fpx".format(laneInfo.centerOffset),
+                    color = when {
+                        kotlin.math.abs(laneInfo.centerOffset) > 50f -> DangerRed
+                        kotlin.math.abs(laneInfo.centerOffset) > 25f -> WarningYellow
+                        else -> SafeGreen
+                    },
+                    style = MaterialTheme.typography.titleSmall
+                )
+            }
+        }
+
+        // Distance
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("DIST", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
             Text(
-                distance?.let { "%.1fm".format(it) } ?: "--",
+                vehicleDistance?.distanceMeters?.let { "%.1fm".format(it) } ?: "--",
                 color = when {
-                    distance == null -> Color.Gray
-                    distance < 15f -> DangerRed
-                    distance < 25f -> WarningYellow
+                    vehicleDistance == null -> Color.Gray
+                    vehicleDistance.distanceMeters < 15f -> DangerRed
+                    vehicleDistance.distanceMeters < 25f -> WarningYellow
                     else -> SafeGreen
-                }
+                },
+                style = MaterialTheme.typography.titleSmall
             )
+        }
+
+        // Time to collision
+        if (vehicleDistance != null && vehicleDistance.timeToCollision < 60f) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("TTC", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(
+                    "%.1fs".format(vehicleDistance.timeToCollision),
+                    color = when {
+                        vehicleDistance.timeToCollision < 2f -> DangerRed
+                        vehicleDistance.timeToCollision < 4f -> WarningYellow
+                        else -> SafeGreen
+                    },
+                    style = MaterialTheme.typography.titleSmall
+                )
+            }
         }
     }
 }

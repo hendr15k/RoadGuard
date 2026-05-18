@@ -2,6 +2,7 @@ package com.roadguard.app.data.ml
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Rect
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mlkit.vision.common.InputImage
@@ -13,6 +14,8 @@ import com.roadguard.app.domain.model.VehicleDistance
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.max
+import kotlin.math.min
 
 class MlDetectionAnalyzer(
     private val vehicleThreshold: Float = 20f,
@@ -37,7 +40,17 @@ class MlDetectionAnalyzer(
     val vehicleDistance: StateFlow<VehicleDistance?> = _vehicleDistance.asStateFlow()
 
     private var lastProcessTime = 0L
-    private val processInterval = 250L
+    private val processInterval = 200L
+    
+    // For distance smoothing and TTC calculation
+    private var prevDistance: Float? = null
+    private var prevTime: Long = 0
+    private val distanceHistory = ArrayDeque<Float>(5)
+    
+    // Camera parameters (approximate for typical smartphone)
+    private val focalLengthPixels = 1000f // Approximate focal length
+    private val vehicleHeightMeters = 1.5f // Average car height
+    private var imageHeightPixels = 1080f // Will be updated
 
     init {
         appContext?.let { ctx ->
@@ -79,6 +92,7 @@ class MlDetectionAnalyzer(
             var tfliteDriftL = false
             var tfliteDriftR = false
             var tfliteConf = 0.05f
+            var tfliteCenterOffset = 0f
 
             if (tfliteRunner?.isLoaded() == true) {
                 try {
@@ -94,6 +108,7 @@ class MlDetectionAnalyzer(
                     tfliteDriftL = segResult.isDriftingLeft
                     tfliteDriftR = segResult.isDriftingRight
                     tfliteConf = segResult.confidence
+                    tfliteCenterOffset = segResult.centerOffset
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -102,14 +117,19 @@ class MlDetectionAnalyzer(
             val finalIsDriftingLeft = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
             val finalIsDriftingRight = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
             val finalConfidence = maxOf(swResult.confidence, tfliteConf)
+            val finalCenterOffset = if (swResult.confidence > 0.3f) swResult.centerOffset else tfliteCenterOffset
 
             _laneInfo.value = LaneInfo(
                 isDriftingLeft = finalIsDriftingLeft,
                 isDriftingRight = finalIsDriftingRight,
-                confidence = finalConfidence
+                confidence = finalConfidence,
+                centerOffset = finalCenterOffset,
+                laneWidth = swResult.laneWidth,
+                leftLaneVisible = swResult.leftLane != null,
+                rightLaneVisible = swResult.rightLane != null
             )
 
-            detectVehicles(inputImage)
+            detectVehicles(inputImage, imageProxy.height)
 
             imageProxy.close()
         } else {
@@ -118,10 +138,12 @@ class MlDetectionAnalyzer(
     }
 
     @SuppressLint("UnsafeOptInUsageError")
-    private fun detectVehicles(inputImage: InputImage) {
+    private fun detectVehicles(inputImage: InputImage, imageHeight: Int) {
+        this.imageHeightPixels = imageHeight.toFloat()
+        
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
-                processVehicleResult(detectedObjects)
+                processVehicleResult(detectedObjects, imageHeight)
             }
             .addOnFailureListener {
                 _vehicleDistance.value = null
@@ -129,47 +151,145 @@ class MlDetectionAnalyzer(
     }
 
     private fun processVehicleResult(
-        detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>
+        detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
+        imageHeight: Int
     ) {
         val vehicleCategories = setOf(
             "Vehicle", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"
         )
 
+        var closestVehicle: DetectedVehicle? = null
         var minDistance = Float.MAX_VALUE
 
         for (obj in detectedObjects) {
             if (obj.labels.any { label ->
                     vehicleCategories.any { cat ->
                         label.text.contains(cat, ignoreCase = true)
-                    } && label.confidence > 0.5f
+                    } && label.confidence > 0.4f
                 }
             ) {
                 val boundingBox = obj.boundingBox
-                val area = boundingBox.width().toFloat() * boundingBox.height().toFloat()
-                val distance = estimateDistance(area)
+                val distance = estimateDistance(
+                    boundingBox = boundingBox,
+                    imageHeight = imageHeight
+                )
+                
                 if (distance < minDistance) {
                     minDistance = distance
+                    closestVehicle = DetectedVehicle(
+                        boundingBox = boundingBox,
+                        distance = distance,
+                        label = obj.labels.firstOrNull()?.text ?: "Vehicle"
+                    )
                 }
             }
         }
 
-        if (minDistance < Float.MAX_VALUE) {
+        if (closestVehicle != null) {
+            // Smooth distance
+            distanceHistory.addLast(closestVehicle.distance)
+            if (distanceHistory.size > 5) distanceHistory.removeFirst()
+            
+            val smoothedDistance = distanceHistory.average().toFloat()
+            
+            // Calculate time to collision
+            val currentTime = System.currentTimeMillis()
+            val ttc = calculateTimeToCollision(smoothedDistance, currentTime)
+            val relativeSpeed = calculateRelativeSpeed(smoothedDistance, currentTime)
+            
+            prevDistance = smoothedDistance
+            prevTime = currentTime
+            
             _vehicleDistance.value = VehicleDistance(
-                distanceMeters = minDistance,
-                isTooClose = minDistance < vehicleThreshold,
-                timestamp = System.currentTimeMillis()
+                distanceMeters = smoothedDistance,
+                isTooClose = smoothedDistance < vehicleThreshold || ttc < 2.5f,
+                timeToCollision = ttc,
+                relativeSpeed = relativeSpeed,
+                timestamp = currentTime
             )
+        } else {
+            distanceHistory.clear()
+            prevDistance = null
+            _vehicleDistance.value = null
         }
     }
 
-    private fun estimateDistance(boundingBoxArea: Float): Float {
-        val baseArea = 50000f
-        val ratio = baseArea / boundingBoxArea.coerceAtLeast(1f)
-        return (5f + ratio * 25f).coerceIn(5f, 100f)
+    private fun estimateDistance(boundingBox: Rect, imageHeight: Int): Float {
+        // Use bounding box height for distance estimation (more reliable than area)
+        val boxHeight = boundingBox.height().toFloat()
+        val boxBottom = boundingBox.bottom.toFloat()
+        
+        if (boxHeight <= 0) return 100f
+        
+        // Method 1: Using known object height and camera focal length
+        // distance = (focalLength * realHeight * imageHeight) / (boxHeight * sensorHeight)
+        // Simplified: distance = focalLength * realHeight / boxHeight
+        val distanceByHeight = (focalLengthPixels * vehicleHeightMeters) / boxHeight
+        
+        // Method 2: Using position in image (lower in image = closer)
+        // Assumes horizon is at 40% of image height
+        val horizonY = imageHeight * 0.4f
+        val groundY = imageHeight.toFloat()
+        val normalizedBottom = (boxBottom - horizonY) / (groundY - horizonY)
+        
+        // If object is above horizon, it's very far
+        if (normalizedBottom < 0.1f) return 100f
+        
+        // Distance based on position (empirical formula)
+        val distanceByPosition = 5f / max(normalizedBottom, 0.05f)
+        
+        // Combine both methods with weighting
+        val combinedDistance = if (distanceByHeight > 0 && distanceByHeight < 200f) {
+            distanceByHeight * 0.6f + distanceByPosition * 0.4f
+        } else {
+            distanceByPosition
+        }
+        
+        // Adjust based on object type (trucks are taller)
+        return combinedDistance.coerceIn(3f, 150f)
+    }
+
+    private fun calculateTimeToCollision(currentDistance: Float, currentTime: Long): Float {
+        val prevDist = prevDistance
+        val prevT = prevTime
+        
+        if (prevDist == null || prevT == 0L || currentTime <= prevT) {
+            return Float.MAX_VALUE
+        }
+        
+        val dt = (currentTime - prevT) / 1000f // seconds
+        val distanceDelta = prevDist - currentDistance // meters
+        
+        if (distanceDelta <= 0.1f || dt <= 0f) {
+            return Float.MAX_VALUE // Not approaching or invalid
+        }
+        
+        val relativeSpeed = distanceDelta / dt // m/s
+        val ttc = currentDistance / relativeSpeed // seconds
+        
+        return if (ttc > 0 && ttc < 60f) ttc else Float.MAX_VALUE
+    }
+
+    private fun calculateRelativeSpeed(currentDistance: Float, currentTime: Long): Float {
+        val prevDist = prevDistance
+        val prevT = prevTime
+        
+        if (prevDist == null || prevT == 0L || currentTime <= prevT) {
+            return 0f
+        }
+        
+        val dt = (currentTime - prevT) / 1000f
+        return (prevDist - currentDistance) / dt
     }
 
     fun close() {
         objectDetector.close()
         tfliteRunner?.close()
     }
+    
+    private data class DetectedVehicle(
+        val boundingBox: Rect,
+        val distance: Float,
+        val label: String
+    )
 }

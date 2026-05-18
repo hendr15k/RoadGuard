@@ -93,7 +93,7 @@ class TfliteModelRunner(private val context: Context) {
         val segH = segmentation.size
         val segW = if (segH > 0) segmentation[0].size else 0
         if (segH == 0 || segW == 0) {
-            return LaneDetector.LaneDetectionResult(null, null, false, false, 0.05f)
+            return LaneDetector.LaneDetectionResult(null, null, 0f, false, false, 0.05f, 0f)
         }
 
         val roadClasses = setOf(2, 6, 7, 14)
@@ -135,9 +135,11 @@ class TfliteModelRunner(private val context: Context) {
         return LaneDetector.LaneDetectionResult(
             leftLane = null,
             rightLane = null,
+            centerOffset = 0f,
             isDriftingLeft = isDriftingLeft,
             isDriftingRight = isDriftingRight,
-            confidence = if (total > 100) 0.6f else 0.1f
+            confidence = if (total > 100) 0.6f else 0.1f,
+            laneWidth = 0f
         )
     }
 
