@@ -2,9 +2,11 @@ package com.roadguard.app.data.ml
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.util.Log
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.pow
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 class LaneDetector(
@@ -29,134 +31,194 @@ class LaneDetector(
     private var prevRightX: Float? = null
 
     fun detectLanes(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): LaneDetectionResult {
-        val width = bitmap.width.coerceAtMost(320)
-        val height = bitmap.height.coerceAtMost(240)
-        val scaled = Bitmap.createScaledBitmap(bitmap, width, height, true)
-        val pixels = IntArray(width * height)
-        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+        val targetW = min(bitmap.width, 480)
+        val targetH = min(bitmap.height, 320)
+        val scaleX = bitmap.width.toFloat() / targetW
+        val scaleY = bitmap.height.toFloat() / targetH
+        val scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+        val pixels = IntArray(targetW * targetH)
+        scaled.getPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
         if (scaled != bitmap) scaled.recycle()
 
-        val gray = ByteArray(width * height)
+        val gray = IntArray(targetW * targetH)
         for (i in pixels.indices) {
             val r = Color.red(pixels[i])
             val g = Color.green(pixels[i])
             val b = Color.blue(pixels[i])
-            gray[i] = ((0.299f * r + 0.587f * g + 0.114f * b).toInt()).coerceIn(0, 255).toByte()
+            gray[i] = (0.299f * r + 0.587f * g + 0.114f * b).toInt().coerceIn(0, 255)
         }
 
-        val mask = ByteArray(width * height)
-        val thresh = (180 - sensitivity * 60).toInt()
-        for (y in (height * 0.5).toInt() until height) {
-            for (x in 0 until width) {
-                val g = gray[y * width + x].toInt() and 0xFF
-                if (g > thresh) {
-                    mask[y * width + x] = 1
-                }
-            }
-        }
-
-        val hist = IntArray(width)
-        for (y in height / 2 until height) {
-            for (x in 0 until width) {
-                hist[x] += mask[y * width + x].toInt()
-            }
-        }
-
-        val midX = width / 2
-        var leftX = hist.slice(0 until midX).indices.maxByOrNull { hist[it] }?.let { it } ?: (midX / 2)
-        var rightX = hist.slice(midX until width).indices.maxByOrNull { hist[midX + it] }?.let { midX + it } ?: (midX + midX / 2)
-
-        val leftSum = hist[leftX]
-        val rightSum = hist[rightX]
-
-        if (leftSum < 10 && rightSum < 10) {
-            val conf = 0.1f
-            return LaneDetectionResult(
-                prevLeftX?.let { LaneLine(it * bitmap.width / width, 0f, it * bitmap.width / width, bitmap.height - 1f, 90f, bitmap.height.toFloat()) },
-                prevRightX?.let { LaneLine(it * bitmap.width / width, 0f, it * bitmap.width / width, bitmap.height - 1f, 90f, bitmap.height.toFloat()) },
-                false, false, conf)
-        }
-
-        if (prevLeftX != null) {
-            leftX = ((leftX * 0.6f + prevLeftX!! * 0.4f)).toInt().coerceIn(0, width - 1)
-        }
-        if (prevRightX != null) {
-            rightX = ((rightX * 0.6f + prevRightX!! * 0.4f)).toInt().coerceIn(0, width - 1)
-        }
-
-        val leftLaneX = leftX * bitmap.width / width
-        val rightLaneX = rightX * bitmap.width / width
-
-        prevLeftX = leftX.toFloat()
-        prevRightX = rightX.toFloat()
-
-        val leftLane = LaneLine(leftLaneX.toFloat(), 0f, leftLaneX.toFloat(), bitmap.height - 1f, 90f, bitmap.height.toFloat())
-        val rightLane = LaneLine(rightLaneX.toFloat(), 0f, rightLaneX.toFloat(), bitmap.height - 1f, 90f, bitmap.height.toFloat())
-
-        val conf = ((leftSum + rightSum).coerceIn(0, 200) / 200f * 0.8f + 0.1f).coerceIn(0.15f, 0.9f)
-
-        return LaneDetectionResult(leftLane, rightLane, leftLaneX < bitmap.width * 0.15f, rightLaneX > bitmap.width * 0.85f, conf)
-    }
-
-    fun detectLanesFromYUV(yData: ByteArray, width: Int, height: Int): LaneDetectionResult {
-        val targetW = width.coerceAtMost(320)
-        val targetH = height.coerceAtMost(240)
-        val stepX = width / targetW
-        val stepY = height / targetH
-
-        val mask = ByteArray(targetW * targetH)
-        val thresh = (180 - sensitivity * 60).toInt()
-        for (y in (targetH * 0.5).toInt() until targetH) {
-            for (x in 0 until targetW) {
-                val g = yData[(y * stepY) * width + (x * stepX)].toInt() and 0xFF
-                if (g > thresh) {
-                    mask[y * targetW + x] = 1
-                }
-            }
-        }
+        val edges = detectEdges(gray, targetW, targetH)
+        val mask = createLaneMask(gray, edges, targetW, targetH)
 
         val hist = IntArray(targetW)
+        var maskSum = 0
         for (y in targetH / 2 until targetH) {
             for (x in 0 until targetW) {
-                hist[x] += mask[y * targetW + x].toInt()
+                hist[x] += mask[y * targetW + x]
+                maskSum += mask[y * targetW + x]
             }
         }
 
         val midX = targetW / 2
-        var leftX = hist.slice(0 until midX).indices.maxByOrNull { hist[it] } ?: (midX / 2)
-        var rightX = hist.slice(midX until targetW).indices.maxByOrNull { hist[midX + it] }?.let { midX + it } ?: (midX + midX / 2)
+        val leftHistPeak = hist.slice(0 until midX).indices.maxByOrNull { hist[it] } ?: (midX / 3)
+        val rightHistPeak = hist.slice(midX until targetW).indices.maxByOrNull { hist[midX + it] }?.let { midX + it } ?: (midX * 5 / 3)
 
-        val leftSum = hist[leftX]
-        val rightSum = hist[rightX]
+        val leftSum = hist[leftHistPeak]
+        val rightSum = hist[rightHistPeak]
 
-        if (leftSum < 10 && rightSum < 10) {
-            val conf = 0.1f
+        if (maskSum > 0) Log.d("LaneDetector", "target=${targetW}x${targetH} maskSum=$maskSum leftPeak=$leftHistPeak(${hist[leftHistPeak]}) rightPeak=$rightHistPeak(${hist[rightHistPeak]})")
+
+        if (leftSum < 5 && rightSum < 5) {
+            return LaneDetectionResult(
+                prevLeftX?.let { LaneLine(it, 0f, it, bitmap.height - 1f, 90f, bitmap.height.toFloat()) },
+                prevRightX?.let { LaneLine(it, 0f, it, bitmap.height - 1f, 90f, bitmap.height.toFloat()) },
+                false, false, 0.1f)
+        }
+
+        var leftX = leftHistPeak
+        var rightX = rightHistPeak
+
+        if (leftSum >= 5 && prevLeftX != null) {
+            leftX = ((leftX * 0.6f + prevLeftX!! / scaleX * 0.4f)).toInt().coerceIn(0, midX - 1)
+        }
+        if (rightSum >= 5 && prevRightX != null) {
+            rightX = ((rightX * 0.6f + prevRightX!! / scaleX * 0.4f)).toInt().coerceIn(midX, targetW - 1)
+        }
+
+        val leftXImg = leftX * scaleX
+        val rightXImg = rightX * scaleX
+
+        prevLeftX = leftXImg
+        prevRightX = rightXImg
+
+        val leftLane = LaneLine(leftXImg, 0f, leftXImg, bitmap.height - 1f, 90f, bitmap.height.toFloat())
+        val rightLane = LaneLine(rightXImg, 0f, rightXImg, bitmap.height - 1f, 90f, bitmap.height.toFloat())
+
+        val totalScore = (leftSum + rightSum).coerceIn(0, 400)
+        val conf = (totalScore / 400f * 0.85f + 0.12f).coerceIn(0.15f, 0.95f)
+
+        val leftDrift = leftXImg < bitmap.width * 0.18f
+        val rightDrift = rightXImg > bitmap.width * 0.82f
+
+        return LaneDetectionResult(leftLane, rightLane, leftDrift, rightDrift, conf)
+    }
+
+    fun detectLanesFromYUV(yData: ByteArray, width: Int, height: Int): LaneDetectionResult {
+        val targetW = min(width, 480)
+        val targetH = min(height, 320)
+        val scaleX = width.toFloat() / targetW
+        val scaleY = height.toFloat() / targetH
+        val stepX = width / targetW
+        val stepY = height / targetH
+
+        val gray = IntArray(targetW * targetH)
+        for (y in 0 until targetH) {
+            for (x in 0 until targetW) {
+                gray[y * targetW + x] = yData[(y * stepY) * width + (x * stepX)].toInt() and 0xFF
+            }
+        }
+
+        val edges = detectEdges(gray, targetW, targetH)
+        val mask = createLaneMask(gray, edges, targetW, targetH)
+
+        val hist = IntArray(targetW)
+        for (y in targetH / 2 until targetH) {
+            for (x in 0 until targetW) {
+                hist[x] += mask[y * targetW + x]
+            }
+        }
+
+        val midX = targetW / 2
+        val leftHistPeak = hist.slice(0 until midX).indices.maxByOrNull { hist[it] } ?: (midX / 3)
+        val rightHistPeak = hist.slice(midX until targetW).indices.maxByOrNull { hist[midX + it] }?.let { midX + it } ?: (midX * 5 / 3)
+
+        val leftSum = hist[leftHistPeak]
+        val rightSum = hist[rightHistPeak]
+
+        if (leftSum < 5 && rightSum < 5) {
             return LaneDetectionResult(
                 prevLeftX?.let { LaneLine(it, 0f, it, height - 1f, 90f, height.toFloat()) },
                 prevRightX?.let { LaneLine(it, 0f, it, height - 1f, 90f, height.toFloat()) },
-                false, false, conf)
+                false, false, 0.1f)
         }
 
-        if (prevLeftX != null) {
-            leftX = ((leftX * 0.7f + prevLeftX!! * 0.3f)).toInt().coerceIn(0, targetW - 1)
+        var leftX = leftHistPeak
+        var rightX = rightHistPeak
+
+        if (leftSum >= 5 && prevLeftX != null) {
+            leftX = ((leftX * 0.6f + prevLeftX!! / scaleX * 0.4f)).toInt().coerceIn(0, midX - 1)
         }
-        if (prevRightX != null) {
-            rightX = ((rightX * 0.7f + prevRightX!! * 0.3f)).toInt().coerceIn(0, targetW - 1)
+        if (rightSum >= 5 && prevRightX != null) {
+            rightX = ((rightX * 0.6f + prevRightX!! / scaleX * 0.4f)).toInt().coerceIn(midX, targetW - 1)
         }
 
-        prevLeftX = leftX.toFloat()
-        prevRightX = rightX.toFloat()
+        val leftXImg = leftX * scaleX
+        val rightXImg = rightX * scaleX
 
-        val leftLane = LaneLine(leftX.toFloat(), 0f, leftX.toFloat(), height - 1f, 90f, height.toFloat())
-        val rightLane = LaneLine(rightX.toFloat(), 0f, rightX.toFloat(), height - 1f, 90f, height.toFloat())
+        prevLeftX = leftXImg
+        prevRightX = rightXImg
 
-        val conf = ((leftSum + rightSum).coerceIn(0, 200) / 200f * 0.8f + 0.1f).coerceIn(0.15f, 0.9f)
+        val leftLane = LaneLine(leftXImg, 0f, leftXImg, height - 1f, 90f, height.toFloat())
+        val rightLane = LaneLine(rightXImg, 0f, rightXImg, height - 1f, 90f, height.toFloat())
 
-        return LaneDetectionResult(leftLane, rightLane, leftX < targetW * 0.15f, rightX > targetW * 0.85f, conf)
+        val totalScore = (leftSum + rightSum).coerceIn(0, 400)
+        val conf = (totalScore / 400f * 0.85f + 0.12f).coerceIn(0.15f, 0.95f)
+
+        val leftDrift = leftXImg < width * 0.18f
+        val rightDrift = rightXImg > width * 0.82f
+
+        return LaneDetectionResult(leftLane, rightLane, leftDrift, rightDrift, conf)
     }
 
     fun reset() {
         prevLeftX = null
         prevRightX = null
+    }
+
+    private fun detectEdges(src: IntArray, w: Int, h: Int): IntArray {
+        val edges = IntArray(w * h)
+        val lowThresh = (25 * sensitivity).toInt().coerceIn(15, 50)
+        val highThresh = lowThresh * 2
+
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val gx = -src[(y-1)*w + (x-1)] + src[(y-1)*w + (x+1)]
+                       -2*src[y*w + (x-1)]       + 2*src[y*w + (x+1)]
+                       -src[(y+1)*w + (x-1)] + src[(y+1)*w + (x+1)]
+                val gy = -src[(y-1)*w + (x-1)] - 2*src[(y-1)*w + x] - src[(y-1)*w + (x+1)]
+                       +src[(y+1)*w + (x-1)] + 2*src[(y+1)*w + x] + src[(y+1)*w + (x+1)]
+                val mag = sqrt((gx * gx + gy * gy).toDouble()).toInt()
+                edges[y * w + x] = if (mag > highThresh) 255 else 0
+            }
+        }
+        return edges
+    }
+
+    private fun createLaneMask(gray: IntArray, edges: IntArray, w: Int, h: Int): IntArray {
+        val mask = IntArray(w * h)
+        val topY = (h * 0.45).toInt()
+
+        val grayMean = gray.filterIndexed { i, _ -> i >= topY * w }.average().toInt()
+        val brightnessThresh = max(grayMean + 20, (140 - sensitivity * 40).toInt())
+
+        for (y in topY until h) {
+            val progress = (y - topY).toFloat() / (h - topY)
+            val leftBound = (w * 0.05f + w * 0.25f * progress).toInt()
+            val rightBound = (w * 0.95f - w * 0.25f * progress).toInt()
+
+            for (x in leftBound until rightBound) {
+                val idx = y * w + x
+                val bright = gray[idx] > brightnessThresh
+                val edge = edges[idx] > 0
+
+                if (bright || edge) {
+                    mask[idx] = 1
+                    if (y < h - 1) mask[(y + 1) * w + x] = max(mask[(y + 1) * w + x], 1)
+                    if (y > topY) mask[(y - 1) * w + x] = max(mask[(y - 1) * w + x], 1)
+                }
+            }
+        }
+        return mask
     }
 }
