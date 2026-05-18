@@ -40,6 +40,7 @@ import com.roadguard.app.data.ml.MlDetectionAnalyzer
 import com.roadguard.app.data.ml.VideoMlAnalyzer
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.ui.components.SettingsBottomSheet
+import com.roadguard.app.ui.components.UpdateBanner
 import com.roadguard.app.ui.components.VideoPreview
 import com.roadguard.app.ui.theme.DangerRed
 import com.roadguard.app.ui.theme.SafeGreen
@@ -49,7 +50,8 @@ import com.roadguard.app.ui.theme.DarkBackground
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun MainScreen(
-    viewModel: MainViewModel = hiltViewModel()
+    viewModel: MainViewModel = hiltViewModel(),
+    updateViewModel: UpdateViewModel = hiltViewModel()
 ) {
     val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
     val context = LocalContext.current
@@ -63,6 +65,7 @@ fun MainScreen(
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val activeWarning by viewModel.activeWarning.collectAsState()
+    val updateState by updateViewModel.updateState.collectAsState()
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -187,6 +190,12 @@ fun MainScreen(
                 onDismiss = { showSettings = false }
             )
         }
+
+        UpdateBanner(
+            updateState = updateState,
+            onDismiss = { updateViewModel.dismissUpdate() },
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
     }
 }
 

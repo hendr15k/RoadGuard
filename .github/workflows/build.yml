@@ -81,6 +81,6 @@ jobs:
           name: Build ${{ github.run_id }} (${{ steps.commit.outputs.SHORT_SHA }})
           files: ./apk/app-debug.apk
           generate_release_notes: true
-          draft: true
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
