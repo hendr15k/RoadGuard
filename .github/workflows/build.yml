@@ -3,8 +3,6 @@ name: Build & Release APK
 on:
   push:
     branches: [master]
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -34,26 +32,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Get Tag
-        id: get_tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Set Artifact Name
-        id: artifact_name
-        run: |
-          if [[ "${{ github.ref_name }}" == v* ]]; then
-            echo "NAME=RoadGuard-${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "NAME=RoadGuard-${{ github.run_id }}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.artifact_name.outputs.NAME }}
+          name: RoadGuard-${{ github.run_id }}
           path: app/build/outputs/apk/debug/app-debug.apk
 
   release:
@@ -77,8 +62,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: build-${{ github.run_id }}
-          name: Build ${{ github.run_id }} (${{ steps.commit.outputs.SHORT_SHA }})
+          tag_name: v${{ github.run_number }}
+          name: v${{ github.run_number }}
           files: ./apk/app-debug.apk
           generate_release_notes: true
           draft: false
