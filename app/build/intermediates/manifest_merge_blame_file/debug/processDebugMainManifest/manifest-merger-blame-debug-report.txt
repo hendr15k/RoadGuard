@@ -2,25 +2,25 @@
 2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
 3    package="com.roadguard.app"
 4    android:versionCode="1"
-5    android:versionName="1.0" >
+5    android:versionName="v1.0.37" >
 6
 7    <uses-sdk
 8        android:minSdkVersion="26"
 9        android:targetSdkVersion="34" />
 10
 11    <uses-feature
-11-->/root/RoadGuard/app/src/main/AndroidManifest.xml:4:5-84
+11-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:4:5-84
 12        android:name="android.hardware.camera"
-12-->/root/RoadGuard/app/src/main/AndroidManifest.xml:4:19-57
+12-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:4:19-57
 13        android:required="true" />
-13-->/root/RoadGuard/app/src/main/AndroidManifest.xml:4:58-81
+13-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:4:58-81
 14
 15    <uses-permission android:name="android.permission.CAMERA" />
-15-->/root/RoadGuard/app/src/main/AndroidManifest.xml:5:5-65
-15-->/root/RoadGuard/app/src/main/AndroidManifest.xml:5:22-62
+15-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:5:5-65
+15-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:5:22-62
 16    <uses-permission android:name="android.permission.VIBRATE" />
-16-->/root/RoadGuard/app/src/main/AndroidManifest.xml:6:5-66
-16-->/root/RoadGuard/app/src/main/AndroidManifest.xml:6:22-63
+16-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:6:5-66
+16-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:6:22-63
 17    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 17-->[androidx.media3:media3-common:1.2.0] /root/.gradle/caches/transforms-3/ee76be36d5c72e637a698d56df87abfe/transformed/jetified-media3-common-1.2.0/AndroidManifest.xml:22:5-79
 17-->[androidx.media3:media3-common:1.2.0] /root/.gradle/caches/transforms-3/ee76be36d5c72e637a698d56df87abfe/transformed/jetified-media3-common-1.2.0/AndroidManifest.xml:22:22-76
@@ -40,44 +40,44 @@
 24-->[androidx.core:core:1.12.0] /root/.gradle/caches/transforms-3/b4a0140bfad86957aafdbcf68bc025b5/transformed/core-1.12.0/AndroidManifest.xml:26:22-94
 25
 26    <application
-26-->/root/RoadGuard/app/src/main/AndroidManifest.xml:8:5-26:19
+26-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:8:5-26:19
 27        android:name="com.roadguard.app.RoadGuardApp"
-27-->/root/RoadGuard/app/src/main/AndroidManifest.xml:9:9-37
+27-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:9:9-37
 28        android:allowBackup="true"
-28-->/root/RoadGuard/app/src/main/AndroidManifest.xml:10:9-35
+28-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:10:9-35
 29        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
 29-->[androidx.core:core:1.12.0] /root/.gradle/caches/transforms-3/b4a0140bfad86957aafdbcf68bc025b5/transformed/core-1.12.0/AndroidManifest.xml:28:18-86
 30        android:debuggable="true"
 31        android:extractNativeLibs="false"
 32        android:icon="@mipmap/ic_launcher"
-32-->/root/RoadGuard/app/src/main/AndroidManifest.xml:11:9-43
+32-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:11:9-43
 33        android:label="@string/app_name"
-33-->/root/RoadGuard/app/src/main/AndroidManifest.xml:12:9-41
+33-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:12:9-41
 34        android:roundIcon="@mipmap/ic_launcher_round"
-34-->/root/RoadGuard/app/src/main/AndroidManifest.xml:13:9-54
+34-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:13:9-54
 35        android:supportsRtl="true"
-35-->/root/RoadGuard/app/src/main/AndroidManifest.xml:14:9-35
+35-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:14:9-35
 36        android:theme="@style/Theme.RoadGuard" >
-36-->/root/RoadGuard/app/src/main/AndroidManifest.xml:15:9-47
+36-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:15:9-47
 37        <activity
-37-->/root/RoadGuard/app/src/main/AndroidManifest.xml:16:9-25:20
+37-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:16:9-25:20
 38            android:name="com.roadguard.app.MainActivity"
-38-->/root/RoadGuard/app/src/main/AndroidManifest.xml:17:13-41
+38-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:17:13-41
 39            android:exported="true"
-39-->/root/RoadGuard/app/src/main/AndroidManifest.xml:18:13-36
+39-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:18:13-36
 40            android:screenOrientation="portrait"
-40-->/root/RoadGuard/app/src/main/AndroidManifest.xml:19:13-49
+40-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:19:13-49
 41            android:theme="@style/Theme.RoadGuard" >
-41-->/root/RoadGuard/app/src/main/AndroidManifest.xml:20:13-51
+41-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:20:13-51
 42            <intent-filter>
-42-->/root/RoadGuard/app/src/main/AndroidManifest.xml:21:13-24:29
+42-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:21:13-24:29
 43                <action android:name="android.intent.action.MAIN" />
-43-->/root/RoadGuard/app/src/main/AndroidManifest.xml:22:17-69
-43-->/root/RoadGuard/app/src/main/AndroidManifest.xml:22:25-66
+43-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:22:17-69
+43-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:22:25-66
 44
 45                <category android:name="android.intent.category.LAUNCHER" />
-45-->/root/RoadGuard/app/src/main/AndroidManifest.xml:23:17-77
-45-->/root/RoadGuard/app/src/main/AndroidManifest.xml:23:27-74
+45-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:23:17-77
+45-->/tmp/RoadGuard/app/src/main/AndroidManifest.xml:23:27-74
 46            </intent-filter>
 47        </activity>
 48

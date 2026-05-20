@@ -94,13 +94,14 @@ class MlDetectionAnalyzer(
             var tfliteConf = 0.05f
             var tfliteCenterOffset = 0f
 
-            if (tfliteRunner?.isLoaded() == true) {
+            val runner = tfliteRunner
+            if (runner != null && runner.isLoaded()) {
                 try {
                     yBuffer.rewind()
                     uBuffer.rewind()
                     vBuffer.rewind()
-                    val segmentation = tfliteRunner.runSegmentationYUV(yBuffer, uBuffer, vBuffer, imageProxy.width, imageProxy.height)
-                    val segResult = tfliteRunner.detectLanesFromSegmentation(
+                    val segmentation = runner.runSegmentationYUV(yBuffer, uBuffer, vBuffer, imageProxy.width, imageProxy.height)
+                    val segResult = runner.detectLanesFromSegmentation(
                         segmentation[0],
                         imageProxy.width,
                         imageProxy.height

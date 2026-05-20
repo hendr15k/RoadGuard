@@ -21,6 +21,23 @@
                     }
                 },
                 {
+                    "source": "/tmp/RoadGuard/app/src/main/res/values/strings.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "46",
+                        "endOffsets": "97"
+                    },
+                    "to": {
+                        "startLines": "551",
+                        "startColumns": "4",
+                        "startOffsets": "34032",
+                        "endColumns": "46",
+                        "endOffsets": "34074"
+                    }
+                },
+                {
                     "source": "/root/.gradle/caches/transforms-3/eff578dde48105e0d1d5f0c00604807d/transformed/jetified-customview-poolingcontainer-1.0.0/res/values/values.xml",
                     "from": {
                         "startLines": "2,3",
@@ -35,25 +52,6 @@
                         "startOffsets": "29143,29448",
                         "endColumns": "53,66",
                         "endOffsets": "29192,29510"
-                    }
-                },
-                {
-                    "source": "/root/RoadGuard/app/src/main/res/values/themes.xml",
-                    "from": {
-                        "startLines": "2",
-                        "startColumns": "4",
-                        "startOffsets": "55",
-                        "endLines": "5",
-                        "endColumns": "12",
-                        "endOffsets": "290"
-                    },
-                    "to": {
-                        "startLines": "2275",
-                        "startColumns": "4",
-                        "startOffsets": "148672",
-                        "endLines": "2278",
-                        "endColumns": "12",
-                        "endOffsets": "148907"
                     }
                 },
                 {
@@ -186,6 +184,25 @@
                     }
                 },
                 {
+                    "source": "/tmp/RoadGuard/app/src/main/res/values/themes.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "5",
+                        "endColumns": "12",
+                        "endOffsets": "290"
+                    },
+                    "to": {
+                        "startLines": "2275",
+                        "startColumns": "4",
+                        "startOffsets": "148672",
+                        "endLines": "2278",
+                        "endColumns": "12",
+                        "endOffsets": "148907"
+                    }
+                },
+                {
                     "source": "/root/.gradle/caches/transforms-3/de2ef83e5f8d56de9a3d7a471c8c2419/transformed/fragment-1.5.1/res/values/values.xml",
                     "from": {
                         "startLines": "2,3,4,5,10",
@@ -295,23 +312,6 @@
                         "startOffsets": "42350,42420,42482,42547,42611,42688,42753,42843,42927",
                         "endColumns": "69,61,64,63,76,64,89,83,68",
                         "endOffsets": "42415,42477,42542,42606,42683,42748,42838,42922,42991"
-                    }
-                },
-                {
-                    "source": "/root/RoadGuard/app/src/main/res/values/strings.xml",
-                    "from": {
-                        "startLines": "2",
-                        "startColumns": "4",
-                        "startOffsets": "55",
-                        "endColumns": "46",
-                        "endOffsets": "97"
-                    },
-                    "to": {
-                        "startLines": "551",
-                        "startColumns": "4",
-                        "startOffsets": "34032",
-                        "endColumns": "46",
-                        "endOffsets": "34074"
                     }
                 },
                 {
