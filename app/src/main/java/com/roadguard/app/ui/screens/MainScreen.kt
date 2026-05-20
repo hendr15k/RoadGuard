@@ -479,20 +479,23 @@ fun PermissionRequest(
 private fun playWarning(context: Context, warning: WarningType) {
     try {
         val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-            manager.defaultVibrator
+            val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            manager?.defaultVibrator
         } else {
             @Suppress("DEPRECATION")
-            context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
         }
 
-        val effect = when (warning) {
-            is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight ->
-                VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE)
-            is WarningType.ForwardCollision ->
-                VibrationEffect.createWaveform(longArrayOf(0, 300, 100, 300), -1)
+        vibrator?.let { v ->
+            if (!v.hasVibrator()) return
+            val effect = when (warning) {
+                is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight ->
+                    VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE)
+                is WarningType.ForwardCollision ->
+                    VibrationEffect.createWaveform(longArrayOf(0, 300, 100, 300), -1)
+            }
+            v.vibrate(effect)
         }
-        vibrator.vibrate(effect)
     } catch (e: Exception) {
         e.printStackTrace()
     }

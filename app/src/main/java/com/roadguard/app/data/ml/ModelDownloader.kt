@@ -55,11 +55,9 @@ class ModelDownloader(private val context: Context) {
 
                     val buffer = ByteArray(8192)
                     var bytesRead: Int
-                    var totalBytes = 0L
 
                     while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                         outputStream.write(buffer, 0, bytesRead)
-                        totalBytes += bytesRead
                     }
 
                     outputStream.close()

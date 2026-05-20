@@ -72,8 +72,8 @@ class VideoMlAnalyzer(
 
             if (tfliteRunner?.isLoaded() == true) {
                 try {
-                    val segmentation = tfliteRunner!!.runSegmentation(bitmap)
-                    val segResult = tfliteRunner!!.detectLanesFromSegmentation(
+                    val segmentation = tfliteRunner.runSegmentation(bitmap)
+                    val segResult = tfliteRunner.detectLanesFromSegmentation(
                         segmentation[0], width, height
                     )
                     tfliteDriftL = segResult.isDriftingLeft
