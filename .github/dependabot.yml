@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "sunday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "gradle"
+    ignore:
+      - dependency-name: "org.jetbrains.kotlin:kotlin-*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "sunday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "ci"
+      - "dependencies"
+    ignore:
+      - dependency-name: "softprops/action-gh-release"
+        update-types: ["version-update:semver-major"]
