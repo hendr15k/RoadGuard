@@ -77,8 +77,8 @@ dependencies {
 
     implementation("com.google.accompanist:accompanist-permissions:0.32.0")
 
-    implementation("androidx.media3:media3-exoplayer:1.2.0")
-    implementation("androidx.media3:media3-ui:1.2.0")
+    implementation("androidx.media3:media3-exoplayer:1.10.1")
+    implementation("androidx.media3:media3-ui:1.10.1")
     implementation("androidx.compose.material:material-icons-extended")
 
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
