@@ -190,17 +190,17 @@ class MlDetectionAnalyzer(
             // Smooth distance
             distanceHistory.addLast(closestVehicle.distance)
             if (distanceHistory.size > 5) distanceHistory.removeFirst()
-            
+
             val smoothedDistance = distanceHistory.average().toFloat()
-            
+
             // Calculate time to collision
             val currentTime = System.currentTimeMillis()
             val ttc = calculateTimeToCollision(smoothedDistance, currentTime)
             val relativeSpeed = calculateRelativeSpeed(smoothedDistance, currentTime)
-            
+
             prevDistance = smoothedDistance
             prevTime = currentTime
-            
+
             _vehicleDistance.value = VehicleDistance(
                 distanceMeters = smoothedDistance,
                 isTooClose = smoothedDistance < vehicleThreshold || ttc < 2.5f,
@@ -209,9 +209,15 @@ class MlDetectionAnalyzer(
                 timestamp = currentTime
             )
         } else {
-            distanceHistory.clear()
-            prevDistance = null
-            _vehicleDistance.value = null
+            val currentTime = System.currentTimeMillis()
+            val gapSec = if (prevTime > 0) (currentTime - prevTime) / 1000f else 0f
+            if (gapSec > 1.5f) {
+                distanceHistory.clear()
+                prevDistance = null
+            }
+            if (gapSec > 3f) {
+                _vehicleDistance.value = null
+            }
         }
     }
 

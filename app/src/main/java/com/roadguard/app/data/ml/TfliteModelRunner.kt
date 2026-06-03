@@ -12,7 +12,7 @@ class TfliteModelRunner(private val context: Context) {
 
     private var interpreter: Interpreter? = null
     private val inputSize = 257
-    private val numClasses = 21
+    private var numClasses: Int = 21
 
     fun loadModel(modelName: String = "deeplabv3.tflite") {
         try {
@@ -31,7 +31,13 @@ class TfliteModelRunner(private val context: Context) {
                     java.nio.ByteBuffer.wrap(bytes)
                 }
             }
-            interpreter = Interpreter(modelBuffer)
+            val newInterpreter = Interpreter(modelBuffer)
+            interpreter = newInterpreter
+
+            val outputShape = newInterpreter.getOutputTensor(0).shape()
+            if (outputShape.size >= 4 && outputShape[1] > 0) {
+                numClasses = outputShape[1]
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -99,7 +105,8 @@ class TfliteModelRunner(private val context: Context) {
         val roadClasses = setOf(2, 6, 7, 14)
         val binaryRoad = Array(segH) { y ->
             ByteArray(segW) { x ->
-                if (segmentation[y][x] in roadClasses || segmentation[y][x] > 0) 255.toByte() else 0.toByte()
+                val cls = segmentation[y][x]
+                if (cls in roadClasses) 255.toByte() else 0.toByte()
             }
         }
 

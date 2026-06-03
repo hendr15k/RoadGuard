@@ -162,7 +162,7 @@ class LaneDetector(
     fun detectLanesFromYUV(yData: ByteArray, width: Int, height: Int): LaneDetectionResult {
         frameCounter++
         val startTime = System.currentTimeMillis()
-        
+
         val targetW = min(width, 800)
         val targetH = min(height, 600)
         val scaleX = width.toFloat() / targetW
@@ -172,14 +172,31 @@ class LaneDetector(
 
         val gray = IntArray(targetW * targetH)
         val hsv = Array(targetH) { FloatArray(targetW * 3) }
-        
+
         for (y in 0 until targetH) {
             for (x in 0 until targetW) {
                 val srcIdx = (y * stepY) * width + (x * stepX)
                 val grayVal = yData[srcIdx].toInt() and 0xFF
                 gray[y * targetW + x] = grayVal
-                
+
                 hsv[y][x * 3 + 2] = grayVal.toFloat()
+                hsv[y][x * 3 + 1] = 0f
+                hsv[y][x * 3] = 0f
+            }
+        }
+
+        if (targetH >= 3 && targetW >= 3) {
+            for (y in 1 until targetH - 1) {
+                for (x in 1 until targetW - 1) {
+                    val center = gray[y * targetW + x]
+                    val right = gray[y * targetW + x + 1]
+                    val down = gray[(y + 1) * targetW + x]
+                    val diff = (abs(right - center) + abs(down - center)) / 2f
+                    val localSat = (diff / 32f).coerceAtMost(1f)
+                    if (localSat > hsv[y][x * 3 + 1]) {
+                        hsv[y][x * 3 + 1] = localSat
+                    }
+                }
             }
         }
 
@@ -458,8 +475,12 @@ class LaneDetector(
                 val idx = y * w + x
                 val gx = -src[idx - w - 1] + src[idx - w + 1] - 2*src[idx - 1] + 2*src[idx + 1] - src[idx + w - 1] + src[idx + w + 1]
                 val gy = -src[idx - w - 1] - 2*src[idx - w] - src[idx - w + 1] + src[idx + w - 1] + 2*src[idx + w] + src[idx + w + 1]
-                val mag = sqrt((gx * gx + gy * gy).toDouble()).toInt()
-                edges[idx] = if (mag > highThresh) 255 else if (mag > lowThresh) 128 else 0
+                val magSq = (gx * gx + gy * gy).toDouble()
+                edges[idx] = when {
+                    magSq > (highThresh * highThresh).toDouble() -> 255
+                    magSq > (lowThresh * lowThresh).toDouble() -> 128
+                    else -> 0
+                }
             }
         }
         return edges
@@ -467,53 +488,69 @@ class LaneDetector(
 
     private fun createRoadMask(gray: IntArray, hsv: Array<FloatArray>?, w: Int, h: Int): IntArray {
         val mask = IntArray(w * h)
-        
+
         val roiTop = (h * 0.05).toInt()
-        
-        val roadPixels = mutableListOf<Int>()
-        for (y in roiTop until h) {
-            for (x in 0 until w) {
-                roadPixels.add(gray[y * w + x])
-            }
+
+        if (roiTop >= h) return mask
+
+        val sampleStep = max(1, ((h - roiTop) * w) / 8000)
+        var sumBright = 0L
+        var countSample = 0
+        var i = 0
+        val totalRoadPixels = (h - roiTop) * w
+        while (i < totalRoadPixels) {
+            val y = roiTop + i / w
+            val x = i % w
+            sumBright += gray[y * w + x]
+            countSample++
+            i += sampleStep
         }
-        
-        if (roadPixels.isEmpty()) return mask
-        
-        val sorted = roadPixels.sorted()
-        val median = sorted[sorted.size / 2]
-        val p95 = sorted[(sorted.size * 0.95).toInt()]
-        
-        val brightnessThresh = ((median + p95) / 2).toInt().coerceIn(100, 200)
-        
+
+        if (countSample == 0) return mask
+        val meanBright = (sumBright / countSample).toInt()
+
+        var sumSq = 0L
+        i = 0
+        while (i < totalRoadPixels) {
+            val y = roiTop + i / w
+            val x = i % w
+            val diff = gray[y * w + x] - meanBright
+            sumSq += diff * diff
+            i += sampleStep
+        }
+        val stdDev = sqrt((sumSq.toDouble() / countSample)).toInt()
+        val brightnessThresh = (meanBright + stdDev * 2).coerceIn(100, 200)
+
         for (y in roiTop until h) {
             val rowProgress = (y - roiTop).toFloat() / (h - roiTop)
-            
+
             val leftEdge = (w * (0.08f + 0.1f * rowProgress)).toInt()
             val rightEdge = (w * (0.92f - 0.1f * rowProgress)).toInt()
-            
+
             for (x in leftEdge until rightEdge) {
                 val idx = y * w + x
                 val brightness = gray[idx]
-                
+
                 var isLaneMarking = brightness > brightnessThresh
-                
+
                 if (hsv != null) {
-                    val h = hsv[y][x * 3]
-                    val s = hsv[y][x * 3 + 1]
+                    val hue = hsv[y][x * 3]
+                    val sat = hsv[y][x * 3 + 1]
                     val v = hsv[y][x * 3 + 2]
-                    
-                    val isWhiteOrYellow = (v > 150f && s < 0.3f) || (h > 30f && h < 70f && s > 0.2f && v > 100f)
-                    if (isWhiteOrYellow) isLaneMarking = true
+
+                    val isWhite = v > 150f && sat < 0.3f
+                    val isYellow = hue > 30f && hue < 70f && sat > 0.2f && v > 100f
+                    if (isWhite || isYellow) isLaneMarking = true
                 }
-                
-                if (brightness > brightnessThresh) {
+
+                if (isLaneMarking) {
                     mask[idx] = 1
                     if (y > roiTop) mask[(y - 1) * w + x] = max(mask[(y - 1) * w + x], 1)
                     if (y < h - 1) mask[(y + 1) * w + x] = max(mask[(y + 1) * w + x], 1)
                 }
             }
         }
-        
+
         return mask
     }
 
@@ -582,7 +619,7 @@ class LaneDetector(
             
             for (y in winYLow until winYHigh) {
                 for (x in winXLow until winXHigh) {
-                    if (mask[y * w + x] > 0) {
+                    if (mask[y * w + x] > 0 || edges[y * w + x] > 0) {
                         sumX += x
                         sumY += y
                         count++
@@ -608,9 +645,10 @@ class LaneDetector(
             } else {
                 expectedRightX.takeIf { it > 0 } ?: (w * 0.8f)
             }
-            
-            return if (lastLeftValid || lastRightValid) {
-                LaneLine(fallbackX, roiTop.toFloat(), fallbackX, roiBottom.toFloat(), 90f, (roiBottom - roiTop).toFloat())
+
+            val lastValid = if (isLeft) lastLeftValid else lastRightValid
+            return if (lastValid) {
+                LaneLine(fallbackX, roiTop.toFloat(), fallbackX, roiBottom.toFloat(), 90f, (roiBottom - roiTop).toFloat(), valid = false)
             } else null
         }
         
@@ -648,7 +686,8 @@ class LaneDetector(
         }
         
         if (!isValidLane) {
-            return if (lastLeftValid || lastRightValid) {
+            val lastValid = if (isLeft) lastLeftValid else lastRightValid
+            return if (lastValid) {
                 val fallbackX = if (isLeft) w * 0.25f else w * 0.75f
                 LaneLine(fallbackX, roiTop.toFloat(), fallbackX, roiBottom.toFloat(), 90f, (roiBottom - roiTop).toFloat(), valid = false)
             } else null
@@ -691,13 +730,20 @@ class LaneDetector(
     }
 
     private fun scaleLine(line: LaneLine, scaleX: Float, scaleY: Float): LaneLine {
+        val nx1 = line.x1 * scaleX
+        val ny1 = line.y1 * scaleY
+        val nx2 = line.x2 * scaleX
+        val ny2 = line.y2 * scaleY
+        val dx = nx2 - nx1
+        val dy = ny2 - ny1
+        val newLength = sqrt(dx * dx + dy * dy)
         return LaneLine(
-            x1 = line.x1 * scaleX,
-            y1 = line.y1 * scaleY,
-            x2 = line.x2 * scaleX,
-            y2 = line.y2 * scaleY,
+            x1 = nx1,
+            y1 = ny1,
+            x2 = nx2,
+            y2 = ny2,
             angle = line.angle,
-            length = line.length * scaleX,
+            length = newLength,
             curvature = line.curvature / scaleX,
             valid = line.valid
         )
@@ -726,7 +772,7 @@ class LaneDetector(
     }
 
     private fun smoothLane(
-        current: LaneLine?, 
+        current: LaneLine?,
         previous: LaneLine?,
         history: ArrayDeque<Float>,
         isLeft: Boolean
@@ -745,19 +791,28 @@ class LaneDetector(
             }
             return null
         }
-        
+
         val currentX = (current.x1 + current.x2) / 2f
         history.addLast(currentX)
         if (history.size > 8) history.removeFirst()
-        
+
         if (previous == null) return current
-        
-        val alpha = 0.7f
+
+        val historyAvgX = if (history.size >= 3) history.average().toFloat() else currentX
+        val historyWeight = if (history.size >= 3) 0.3f else 0f
+        val baseAlpha = 0.7f
+        val effectiveAlpha = baseAlpha * (1f - historyWeight) + historyWeight * 0.5f
+
+        val smoothedX1 = current.x1 * effectiveAlpha + previous.x1 * (1f - effectiveAlpha)
+        val smoothedX2 = current.x2 * effectiveAlpha + previous.x2 * (1f - effectiveAlpha)
+        val x1 = smoothedX1 * (1f - historyWeight) + historyAvgX * historyWeight
+        val x2 = smoothedX2 * (1f - historyWeight) + historyAvgX * historyWeight
+
         return LaneLine(
-            x1 = current.x1 * alpha + previous.x1 * (1 - alpha),
-            y1 = current.y1 * alpha + previous.y1 * (1 - alpha),
-            x2 = current.x2 * alpha + previous.x2 * (1 - alpha),
-            y2 = current.y2 * alpha + previous.y2 * (1 - alpha),
+            x1 = x1,
+            y1 = current.y1 * baseAlpha + previous.y1 * (1 - baseAlpha),
+            x2 = x2,
+            y2 = current.y2 * baseAlpha + previous.y2 * (1 - baseAlpha),
             angle = current.angle,
             length = current.length,
             curvature = current.curvature,
