@@ -5,6 +5,9 @@ on:
     branches: [master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -63,10 +66,11 @@ jobs:
             ## RoadGuard v${{ steps.version.outputs.version }}
 
             Built from commit `${{ github.sha }}`
-            Short SHA: `${{ github.sha_short }}`
             Triggered by: `${{ github.event_name }}`
+
+            ### Changes
+            See commits since last release.
           files: ./apk/app-debug.apk
           draft: false
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
