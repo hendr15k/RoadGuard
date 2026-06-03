@@ -31,7 +31,6 @@ fun UpdateBanner(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    android.util.Log.d("UpdateBanner", "State: $updateState")
 
     AnimatedVisibility(
         visible = updateState is UpdateState.UpdateAvailable,
@@ -106,8 +105,15 @@ fun UpdateBanner(
 
                     Button(
                         onClick = {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(state.updateInfo.downloadUrl))
-                            context.startActivity(intent)
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(state.updateInfo.downloadUrl))
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                            } catch (e: android.content.ActivityNotFoundException) {
+                                android.util.Log.e("UpdateBanner", "No activity to handle URL", e)
+                            } catch (e: Exception) {
+                                android.util.Log.e("UpdateBanner", "Failed to open update URL", e)
+                            }
                         },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(

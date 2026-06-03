@@ -43,7 +43,7 @@ class VideoMlAnalyzer(
     private val distanceHistory = ArrayDeque<Float>(5)
 
     // Camera parameters (approximate for typical smartphone)
-    private val focalLengthPixels = 1000f
+    private var focalLengthPixels = 1500f
     private val vehicleHeightMeters = 1.5f
 
     @Volatile

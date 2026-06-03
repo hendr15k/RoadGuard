@@ -48,7 +48,7 @@ class MlDetectionAnalyzer(
     private val distanceHistory = ArrayDeque<Float>(5)
 
     // Camera parameters (approximate for typical smartphone)
-    private val focalLengthPixels = 1000f // Approximate focal length
+    private var focalLengthPixels = 1500f // More accurate default for ~1080p smartphones
     private val vehicleHeightMeters = 1.5f // Average car height
     private var imageHeightPixels = 1080f // Will be updated
 

@@ -100,7 +100,16 @@ class UpdateChecker(context: Context) {
     }
 
     fun resetDismissed() {
-        prefs.edit().clear().apply()
+        val currentState = _updateState.value
+        if (currentState is UpdateState.UpdateAvailable) {
+            prefs.edit()
+                .remove("${KEY_UPDATE_DISMISSED}_${currentState.updateInfo.tagName}")
+                .apply()
+        } else {
+            prefs.all.keys
+                .filter { it.startsWith(KEY_UPDATE_DISMISSED) }
+                .forEach { key -> prefs.edit().remove(key).apply() }
+        }
         _updateState.value = UpdateState.Idle
     }
 
@@ -110,10 +119,9 @@ class UpdateChecker(context: Context) {
 
         return when {
             releaseBuildNumber > 0 && currentBuildNumber > 0 -> releaseBuildNumber > currentBuildNumber
-            releaseBuildNumber > 0 && currentBuildNumber == 0L -> true
-            releaseBuildNumber == 0L && currentBuildNumber > 0 -> false
-            releaseTag.startsWith("build-") && !currentVersion.startsWith("build-") -> true
-            !releaseTag.startsWith("build-") && currentVersion.startsWith("build-") -> false
+            releaseTag.startsWith("v") && currentVersion.startsWith("v") -> compareSemanticVersions(releaseTag, currentVersion) > 0
+            releaseTag.startsWith("build-") && currentVersion.startsWith("v") -> true
+            releaseTag.startsWith("v") && currentVersion.startsWith("build-") -> false
             else -> compareSemanticVersions(releaseTag, currentVersion) > 0
         }
     }

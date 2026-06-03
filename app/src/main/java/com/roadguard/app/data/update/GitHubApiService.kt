@@ -18,9 +18,15 @@ class GitHubApiService(private val context: Context) {
     private val gson = Gson()
 
     suspend fun getLatestRelease(): Result<GitHubRelease> = withContext(Dispatchers.IO) {
-        try {
+        val connection = try {
             val url = URL(RELEASES_URL)
-            val connection = url.openConnection() as HttpURLConnection
+            url.openConnection() as HttpURLConnection
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception opening connection", e)
+            return@withContext Result.failure(e)
+        }
+
+        try {
             connection.requestMethod = "GET"
             connection.setRequestProperty("Accept", "application/vnd.github+json")
             connection.setRequestProperty("User-Agent", "RoadGuard-Android")
@@ -28,8 +34,14 @@ class GitHubApiService(private val context: Context) {
             connection.readTimeout = 10000
 
             val responseCode = connection.responseCode
+            if (responseCode == 403) {
+                val retryAfter = connection.getHeaderField("Retry-After")?.toLongOrNull() ?: 60L
+                Log.w(TAG, "Rate limited. Retry after: $retryAfter seconds")
+                return@withContext Result.failure(Exception("Rate limited. Try again in $retryAfter seconds."))
+            }
+
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                val response = connection.inputStream.bufferedReader().readText()
+                val response = connection.inputStream.bufferedReader().use { it.readText() }
                 val releases = gson.fromJson(response, Array<GitHubRelease>::class.java)
                 if (releases.isNotEmpty()) {
                     Result.success(releases.first())
@@ -43,6 +55,8 @@ class GitHubApiService(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Exception fetching releases", e)
             Result.failure(e)
+        } finally {
+            connection.disconnect()
         }
     }
 
