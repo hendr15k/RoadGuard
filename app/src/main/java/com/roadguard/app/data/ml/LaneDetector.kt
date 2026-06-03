@@ -21,7 +21,12 @@ class LaneDetector(
         val angle: Float,
         val length: Float,
         val curvature: Float = 0f,
-        val valid: Boolean = true
+        val valid: Boolean = true,
+        val polyA: Float = 0f,
+        val polyB: Float = 0f,
+        val polyC: Float = 0f,
+        val yStart: Float = 0f,
+        val yEnd: Float = 0f
     )
 
     data class LaneDetectionResult(
@@ -31,7 +36,9 @@ class LaneDetector(
         val isDriftingLeft: Boolean,
         val isDriftingRight: Boolean,
         val confidence: Float,
-        val laneWidth: Float
+        val laneWidth: Float,
+        val imageWidth: Int = 0,
+        val imageHeight: Int = 0
     )
 
     private var prevLeftLine: LaneLine? = null
@@ -54,30 +61,30 @@ class LaneDetector(
     fun detectLanes(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): LaneDetectionResult {
         frameCounter++
         val startTime = System.currentTimeMillis()
-        
+
         val targetW = min(bitmap.width, 800)
         val targetH = min(bitmap.height, 600)
         val scaleX = bitmap.width.toFloat() / targetW
         val scaleY = bitmap.height.toFloat() / targetH
-        
+
         val scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
         val pixels = IntArray(targetW * targetH)
         scaled.getPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
         if (scaled != bitmap) scaled.recycle()
 
-        val gray = IntArray(targetW * targetH)
+        val rawGray = IntArray(targetW * targetH)
         val hsv = Array(targetH) { FloatArray(targetW * 3) }
-        
+
         for (i in pixels.indices) {
             val r = Color.red(pixels[i])
             val g = Color.green(pixels[i])
             val b = Color.blue(pixels[i])
-            gray[i] = (0.299f * r + 0.587f * g + 0.114f * b).toInt().coerceIn(0, 255)
-            
+            rawGray[i] = (0.299f * r + 0.587f * g + 0.114f * b).toInt().coerceIn(0, 255)
+
             val maxVal = max(r.toFloat(), max(g.toFloat(), b.toFloat()))
             val minVal = min(r.toFloat(), min(g.toFloat(), b.toFloat()))
             val delta = maxVal - minVal
-            
+
             hsv[i / targetW][(i % targetW) * 3] = when {
                 delta < 1f -> 0f
                 maxVal == r.toFloat() -> 60f * (((g - b) / delta) % 6f)
@@ -88,6 +95,8 @@ class LaneDetector(
             hsv[i / targetW][(i % targetW) * 3 + 1] = if (maxVal > 0) delta / maxVal else 0f
             hsv[i / targetW][(i % targetW) * 3 + 2] = maxVal
         }
+
+        val gray = gaussianBlur5x5(rawGray, targetW, targetH)
 
         computePerspectiveMatrix(targetW, targetH)
         
@@ -155,7 +164,9 @@ class LaneDetector(
             isDriftingLeft = isDriftingLeft,
             isDriftingRight = isDriftingRight,
             confidence = confidence,
-            laneWidth = laneWidth
+            laneWidth = laneWidth,
+            imageWidth = bitmap.width,
+            imageHeight = bitmap.height
         )
     }
 
@@ -170,20 +181,22 @@ class LaneDetector(
         val stepX = width / targetW
         val stepY = height / targetH
 
-        val gray = IntArray(targetW * targetH)
+        val rawGray = IntArray(targetW * targetH)
         val hsv = Array(targetH) { FloatArray(targetW * 3) }
 
         for (y in 0 until targetH) {
             for (x in 0 until targetW) {
                 val srcIdx = (y * stepY) * width + (x * stepX)
                 val grayVal = yData[srcIdx].toInt() and 0xFF
-                gray[y * targetW + x] = grayVal
+                rawGray[y * targetW + x] = grayVal
 
                 hsv[y][x * 3 + 2] = grayVal.toFloat()
                 hsv[y][x * 3 + 1] = 0f
                 hsv[y][x * 3] = 0f
             }
         }
+
+        val gray = gaussianBlur5x5(rawGray, targetW, targetH)
 
         if (targetH >= 3 && targetW >= 3) {
             for (y in 1 until targetH - 1) {
@@ -265,7 +278,9 @@ class LaneDetector(
             isDriftingLeft = isDriftingLeft,
             isDriftingRight = isDriftingRight,
             confidence = confidence,
-            laneWidth = laneWidth
+            laneWidth = laneWidth,
+            imageWidth = width,
+            imageHeight = height
         )
     }
 
@@ -562,34 +577,34 @@ class LaneDetector(
         roiTop: Int, roiBottom: Int,
         isLeft: Boolean
     ): LaneLine? {
-        val numWindows = 12
+        val numWindows = 14
         val windowHeight = (roiBottom - roiTop) / numWindows
-        
+
         val points = mutableListOf<Pair<Int, Int>>()
-        
+
         val histogram = IntArray(w)
-        for (y in roiBottom - windowHeight * 2 until roiBottom) {
+        val histStart = (roiBottom - windowHeight * 3).coerceAtLeast(roiTop)
+        for (y in histStart until roiBottom) {
             for (x in 0 until w) {
-                if (mask[y * w + x] > 0 || edges[y * w + x] > 0) {
-                    histogram[x] += 2
-                }
+                val e = edges[y * w + x]
+                val m = mask[y * w + x]
+                if (m > 0) histogram[x] += 3
+                else if (e > 0) histogram[x] += 1
             }
         }
-        
+
         val midX = w / 2
         val searchStart = if (isLeft) 0 else midX
         val searchEnd = if (isLeft) midX else w
-        
+
         var peakX = if (isLeft) w / 4 else w * 3 / 4
-        
-        if (expectedLeftX > 0 || expectedRightX > 0) {
-            val expected = if (isLeft) expectedLeftX else expectedRightX
-            if (expected > 0) {
-                peakX = expected.toInt().coerceIn(searchStart, searchEnd - 1)
-            }
+
+        val expected = if (isLeft) expectedLeftX else expectedRightX
+        if (expected > 0) {
+            peakX = expected.toInt().coerceIn(searchStart, searchEnd - 1)
         }
-        
-        val windowWidth = w / 6
+
+        val windowWidth = w / 8
         var maxSum = 0
         for (i in searchStart until searchEnd - windowWidth) {
             var sum = 0
@@ -601,22 +616,25 @@ class LaneDetector(
                 peakX = i + windowWidth / 2
             }
         }
-        
+        if (expected > 0) {
+            val blended = peakX * 0.6f + expected * 0.4f
+            peakX = blended.toInt().coerceIn(searchStart, searchEnd - 1)
+        }
+
         var currentX = peakX.toFloat()
-        
+
         for (win in 0 until numWindows) {
             val winYLow = roiBottom - (win + 1) * windowHeight
             val winYHigh = roiBottom - win * windowHeight
-            val winYCenter = (winYLow + winYHigh) / 2
-            
-            val margin = (windowWidth * (1.2f + win * 0.15f)).toInt().coerceIn(windowWidth / 2, windowWidth * 2)
+
+            val margin = (windowWidth * (1.0f + win * 0.1f)).toInt().coerceIn(windowWidth / 2, windowWidth * 2)
             val winXLow = (currentX - margin).toInt().coerceIn(0, w - 1)
             val winXHigh = (currentX + margin).toInt().coerceIn(1, w)
-            
+
             var sumX = 0
             var sumY = 0
             var count = 0
-            
+
             for (y in winYLow until winYHigh) {
                 for (x in winXLow until winXHigh) {
                     if (mask[y * w + x] > 0 || edges[y * w + x] > 0) {
@@ -626,19 +644,19 @@ class LaneDetector(
                     }
                 }
             }
-            
-            if (count > 10) {
+
+            if (count > 8) {
                 val newX = sumX.toFloat() / count
                 val newY = sumY.toFloat() / count
-                
-                val maxJump = windowWidth * 0.8f
+
+                val maxJump = windowWidth * 0.7f
                 if (abs(newX - currentX) < maxJump || points.isEmpty()) {
-                    currentX = currentX * 0.2f + newX * 0.8f
+                    currentX = currentX * 0.3f + newX * 0.7f
                     points.add(Pair(currentX.toInt(), newY.toInt()))
                 }
             }
         }
-        
+
         if (points.size < 4) {
             val fallbackX = if (isLeft) {
                 expectedLeftX.takeIf { it > 0 } ?: (w * 0.2f)
@@ -648,21 +666,26 @@ class LaneDetector(
 
             val lastValid = if (isLeft) lastLeftValid else lastRightValid
             return if (lastValid) {
-                LaneLine(fallbackX, roiTop.toFloat(), fallbackX, roiBottom.toFloat(), 90f, (roiBottom - roiTop).toFloat(), valid = false)
+                LaneLine(
+                    x1 = fallbackX, y1 = roiTop.toFloat(),
+                    x2 = fallbackX, y2 = roiBottom.toFloat(),
+                    angle = 90f, length = (roiBottom - roiTop).toFloat(),
+                    valid = false
+                )
             } else null
         }
-        
-        val validPoints = if (points.size > 20) {
-            points.sortedByDescending { it.second }.take(20)
+
+        val validPoints = if (points.size > 25) {
+            points.sortedByDescending { it.second }.take(25)
         } else points
-        
+
         val n = validPoints.size
         var sumX = 0.0
         var sumY = 0.0
         var sumX2 = 0.0
         var sumXY = 0.0
         var sumY2 = 0.0
-        
+
         for ((x, y) in validPoints) {
             sumX += x
             sumY += y
@@ -670,35 +693,55 @@ class LaneDetector(
             sumXY += x * y.toDouble()
             sumY2 += y * y.toDouble()
         }
-        
+
         val denom = n * sumY2 - sumY * sumY
         if (abs(denom) < 1.0) return null
-        
-        val b = ((n * sumXY - sumX * sumY) / denom).toFloat()
-        val c = ((sumX - b * sumY) / n).toFloat()
-        
-        val xAtTop = (b * roiTop + c).coerceIn(0f, w.toFloat())
-        val xAtBottom = (b * roiBottom + c).coerceIn(0f, w.toFloat())
-        
+
+        val bLinear = ((n * sumXY - sumX * sumY) / denom).toFloat()
+        val cLinear = ((sumX - bLinear * sumY) / n).toFloat()
+
+        val polyFit = fitPolynomial(validPoints, w)
+        val (a, bCoef, cCoef) = if (polyFit != null) polyFit else Triple(0f, bLinear, cLinear)
+
+        val yStartF = roiTop.toFloat()
+        val yEndF = roiBottom.toFloat()
+        fun polyX(y: Float): Float = a * y * y + bCoef * y + cCoef
+
+        val xAtTop = polyX(yStartF).coerceIn(0f, w.toFloat())
+        val xAtBottom = polyX(yEndF).coerceIn(0f, w.toFloat())
+
         val isValidLane = when {
-            isLeft -> xAtBottom < midX - windowWidth / 3 && xAtTop < midX
-            else -> xAtBottom > midX + windowWidth / 3 && xAtTop > midX
+            isLeft -> xAtBottom < midX - windowWidth / 4 && xAtTop < midX
+            else -> xAtBottom > midX + windowWidth / 4 && xAtTop > midX
         }
-        
+
         if (!isValidLane) {
             val lastValid = if (isLeft) lastLeftValid else lastRightValid
             return if (lastValid) {
                 val fallbackX = if (isLeft) w * 0.25f else w * 0.75f
-                LaneLine(fallbackX, roiTop.toFloat(), fallbackX, roiBottom.toFloat(), 90f, (roiBottom - roiTop).toFloat(), valid = false)
+                LaneLine(
+                    x1 = fallbackX, y1 = yStartF,
+                    x2 = fallbackX, y2 = yEndF,
+                    angle = 90f, length = yEndF - yStartF,
+                    valid = false
+                )
             } else null
         }
-        
+
         val dx = xAtBottom - xAtTop
-        val dy = (roiBottom - roiTop).toFloat()
+        val dy = yEndF - yStartF
         val angle = atan2(dy.toDouble(), dx.toDouble()).toFloat() * 180f / kotlin.math.PI.toFloat()
         val length = sqrt(dx * dx + dy * dy)
-        
-        return LaneLine(xAtTop, roiTop.toFloat(), xAtBottom, roiBottom.toFloat(), angle, length, curvature = b)
+
+        return LaneLine(
+            x1 = xAtTop, y1 = yStartF,
+            x2 = xAtBottom, y2 = yEndF,
+            angle = angle, length = length,
+            curvature = bCoef,
+            valid = true,
+            polyA = a, polyB = bCoef, polyC = cCoef,
+            yStart = yStartF, yEnd = yEndF
+        )
     }
 
     private fun calculateConfidence(
@@ -745,8 +788,101 @@ class LaneDetector(
             angle = line.angle,
             length = newLength,
             curvature = line.curvature / scaleX,
-            valid = line.valid
+            valid = line.valid,
+            polyA = line.polyA,
+            polyB = line.polyB / scaleX,
+            polyC = line.polyC,
+            yStart = line.yStart * scaleY,
+            yEnd = line.yEnd * scaleY
         )
+    }
+
+    private fun gaussianBlur5x5(src: IntArray, w: Int, h: Int): IntArray {
+        val dst = IntArray(w * h)
+        val kernel = intArrayOf(1, 4, 6, 4, 1, 4, 16, 24, 16, 4, 6, 24, 36, 24, 6, 4, 16, 24, 16, 4, 1, 4, 6, 4, 1)
+        val kernelSum = 256
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                if (y < 2 || y >= h - 2 || x < 2 || x >= w - 2) {
+                    dst[y * w + x] = src[y * w + x]
+                    continue
+                }
+                var sum = 0
+                var ki = 0
+                for (ky in -2..2) {
+                    for (kx in -2..2) {
+                        val srcIdx = (y + ky) * w + (x + kx)
+                        sum += src[srcIdx] * kernel[ki]
+                        ki++
+                    }
+                }
+                dst[y * w + x] = (sum / kernelSum).coerceIn(0, 255)
+            }
+        }
+        return dst
+    }
+
+    private fun fitPolynomial(points: List<Pair<Int, Int>>, w: Int): Triple<Float, Float, Float>? {
+        if (points.size < 5) return null
+        val n = points.size
+        var sumY = 0.0
+        var sumY2 = 0.0
+        var sumY3 = 0.0
+        var sumY4 = 0.0
+        var sumX = 0.0
+        var sumXY = 0.0
+        var sumXY2 = 0.0
+        for ((x, y) in points) {
+            val yd = y.toDouble()
+            val xd = x.toDouble()
+            sumY += yd
+            sumY2 += yd * yd
+            sumY3 += yd * yd * yd
+            sumY4 += yd * yd * yd * yd
+            sumX += xd
+            sumXY += xd * yd
+            sumXY2 += xd * yd * yd
+        }
+        val m = Array(3) { DoubleArray(3) }
+        m[0][0] = n.toDouble();    m[0][1] = sumY;      m[0][2] = sumY2
+        m[1][0] = sumY;           m[1][1] = sumY2;     m[1][2] = sumY3
+        m[2][0] = sumY2;          m[2][1] = sumY3;     m[2][2] = sumY4
+        val b = doubleArrayOf(sumX, sumXY, sumXY2)
+        return solve3x3(m, b)?.let { sol ->
+            val a = sol[2].toFloat()
+            val bcoef = sol[1].toFloat()
+            val ccoef = sol[0].toFloat()
+            if (abs(a) > 0.5f) null else Triple(a, bcoef, ccoef)
+        }
+    }
+
+    private fun solve3x3(m: Array<DoubleArray>, b: DoubleArray): DoubleArray? {
+        val n = 3
+        val aug = Array(n) { i -> DoubleArray(n + 1) }
+        for (i in 0 until n) {
+            for (j in 0 until n) aug[i][j] = m[i][j]
+            aug[i][n] = b[i]
+        }
+        for (col in 0 until n) {
+            var maxRow = col
+            for (row in col + 1 until n) {
+                if (abs(aug[row][col]) > abs(aug[maxRow][col])) maxRow = row
+            }
+            val temp = aug[col]; aug[col] = aug[maxRow]; aug[maxRow] = temp
+            if (abs(aug[col][col]) < 1e-9) return null
+            for (row in col + 1 until n) {
+                val factor = aug[row][col] / aug[col][col]
+                for (j in col until n + 1) aug[row][j] -= factor * aug[col][j]
+            }
+        }
+        val x = DoubleArray(n)
+        for (i in n - 1 downTo 0) {
+            x[i] = aug[i][n]
+            for (j in i + 1 until n) x[i] -= aug[i][j] * x[j]
+            x[i] /= aug[i][i]
+        }
+        return x
     }
 
     private fun calculateCenterOffset(leftLane: LaneLine?, rightLane: LaneLine?, imgWidth: Int): Float {

@@ -39,6 +39,7 @@ import com.google.accompanist.permissions.rememberPermissionState
 import com.roadguard.app.data.ml.MlDetectionAnalyzer
 import com.roadguard.app.data.ml.VideoMlAnalyzer
 import com.roadguard.app.domain.model.WarningType
+import com.roadguard.app.ui.components.LaneOverlay
 import com.roadguard.app.ui.components.SettingsBottomSheet
 import com.roadguard.app.ui.components.UpdateBanner
 import com.roadguard.app.ui.components.VideoPreview
@@ -115,6 +116,11 @@ fun MainScreen(
                     videoAnalyzer = videoAnalyzer
                 )
 
+                LaneOverlay(
+                    laneInfo = laneInfo,
+                    modifier = Modifier.fillMaxSize()
+                )
+
                 WarningOverlay(
                     laneInfo = laneInfo,
                     vehicleDistance = vehicleDistance,
@@ -145,6 +151,11 @@ fun MainScreen(
                     onLaneUpdate = viewModel::updateLaneInfo,
                     onDistanceUpdate = viewModel::updateVehicleDistance,
                     appContext = appContext
+                )
+
+                LaneOverlay(
+                    laneInfo = laneInfo,
+                    modifier = Modifier.fillMaxSize()
                 )
 
                 WarningOverlay(

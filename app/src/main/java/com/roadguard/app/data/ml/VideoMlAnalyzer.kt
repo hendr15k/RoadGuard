@@ -118,7 +118,21 @@ class VideoMlAnalyzer(
                 centerOffset = finalCenterOffset,
                 laneWidth = swResult.laneWidth,
                 leftLaneVisible = swResult.leftLane != null,
-                rightLaneVisible = swResult.rightLane != null
+                rightLaneVisible = swResult.rightLane != null,
+                leftCurve = swResult.leftLane?.let { l ->
+                    com.roadguard.app.domain.model.LaneCurve(
+                        a = l.polyA, b = l.polyB, c = l.polyC,
+                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
+                    )
+                } ?: com.roadguard.app.domain.model.LaneCurve(),
+                rightCurve = swResult.rightLane?.let { l ->
+                    com.roadguard.app.domain.model.LaneCurve(
+                        a = l.polyA, b = l.polyB, c = l.polyC,
+                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
+                    )
+                } ?: com.roadguard.app.domain.model.LaneCurve(),
+                imageWidth = swResult.imageWidth,
+                imageHeight = swResult.imageHeight
             )
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
