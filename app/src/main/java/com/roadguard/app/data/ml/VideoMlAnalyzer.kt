@@ -36,15 +36,18 @@ class VideoMlAnalyzer(
 
     private var lastProcessTime = 0L
     private val processInterval = 200L
-    
+
     // For distance smoothing and TTC calculation
     private var prevDistance: Float? = null
     private var prevTime: Long = 0
     private val distanceHistory = ArrayDeque<Float>(5)
-    
+
     // Camera parameters (approximate for typical smartphone)
     private val focalLengthPixels = 1000f
     private val vehicleHeightMeters = 1.5f
+
+    @Volatile
+    private var closed = false
 
     init {
         appContext?.let { ctx ->
@@ -58,8 +61,15 @@ class VideoMlAnalyzer(
     }
 
     fun analyzeFrame(bitmap: Bitmap, width: Int, height: Int) {
+        if (closed) {
+            bitmap.recycle()
+            return
+        }
         val currentTime = System.currentTimeMillis()
-        if (currentTime - lastProcessTime < processInterval) return
+        if (currentTime - lastProcessTime < processInterval) {
+            bitmap.recycle()
+            return
+        }
         lastProcessTime = currentTime
 
         try {
@@ -262,8 +272,17 @@ class VideoMlAnalyzer(
     }
 
     fun close() {
-        objectDetector.close()
-        tfliteRunner?.close()
+        closed = true
+        try {
+            objectDetector.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        try {
+            tfliteRunner?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
     
     private data class DetectedVehicle(

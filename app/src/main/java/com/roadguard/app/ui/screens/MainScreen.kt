@@ -67,6 +67,12 @@ fun MainScreen(
     val activeWarning by viewModel.activeWarning.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
 
+    DisposableEffect(Unit) {
+        onDispose {
+            videoAnalyzer.close()
+        }
+    }
+
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -494,7 +500,12 @@ private fun playWarning(context: Context, warning: WarningType) {
                 is WarningType.ForwardCollision ->
                     VibrationEffect.createWaveform(longArrayOf(0, 300, 100, 300), -1)
             }
-            v.vibrate(effect)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                v.vibrate(effect, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_ALARM))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(effect)
+            }
         }
     } catch (e: Exception) {
         e.printStackTrace()

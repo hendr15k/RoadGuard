@@ -41,16 +41,19 @@ class MlDetectionAnalyzer(
 
     private var lastProcessTime = 0L
     private val processInterval = 200L
-    
+
     // For distance smoothing and TTC calculation
     private var prevDistance: Float? = null
     private var prevTime: Long = 0
     private val distanceHistory = ArrayDeque<Float>(5)
-    
+
     // Camera parameters (approximate for typical smartphone)
     private val focalLengthPixels = 1000f // Approximate focal length
     private val vehicleHeightMeters = 1.5f // Average car height
     private var imageHeightPixels = 1080f // Will be updated
+
+    @Volatile
+    private var closed = false
 
     init {
         appContext?.let { ctx ->
@@ -65,6 +68,10 @@ class MlDetectionAnalyzer(
 
     @SuppressLint("UnsafeOptInUsageError")
     override fun analyze(imageProxy: ImageProxy) {
+        if (closed) {
+            imageProxy.close()
+            return
+        }
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastProcessTime < processInterval) {
             imageProxy.close()
@@ -290,8 +297,17 @@ class MlDetectionAnalyzer(
     }
 
     fun close() {
-        objectDetector.close()
-        tfliteRunner?.close()
+        closed = true
+        try {
+            objectDetector.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        try {
+            tfliteRunner?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
     
     private data class DetectedVehicle(

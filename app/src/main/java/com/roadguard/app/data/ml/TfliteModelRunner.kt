@@ -23,11 +23,7 @@ class TfliteModelRunner(private val context: Context) {
                 try {
                     FileUtil.loadMappedFile(context, modelName)
                 } catch (e: Exception) {
-                    val assetFd = context.assets.openFd(modelName)
-                    val inputStream = context.assets.open(modelName)
-                    val bytes = inputStream.readBytes()
-                    inputStream.close()
-                    assetFd.close()
+                    val bytes = context.assets.open(modelName).use { it.readBytes() }
                     java.nio.ByteBuffer.wrap(bytes)
                 }
             }
