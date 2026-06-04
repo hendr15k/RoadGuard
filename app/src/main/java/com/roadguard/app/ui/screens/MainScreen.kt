@@ -118,33 +118,34 @@ fun MainScreen(
                         videoAnalyzer = videoAnalyzer
                     )
 
-                LaneOverlay(
-                    laneInfo = laneInfo,
-                    modifier = Modifier.fillMaxSize()
-                )
+                    LaneOverlay(
+                        laneInfo = laneInfo,
+                        modifier = Modifier.fillMaxSize()
+                    )
 
-                WarningOverlay(
-                    laneInfo = laneInfo,
-                    vehicleDistance = vehicleDistance,
-                    modifier = Modifier.fillMaxSize()
-                )
+                    WarningOverlay(
+                        laneInfo = laneInfo,
+                        vehicleDistance = vehicleDistance,
+                        modifier = Modifier.fillMaxSize()
+                    )
 
-                StatusBar(
-                    laneInfo = laneInfo,
-                    vehicleDistance = vehicleDistance,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 48.dp)
-                )
+                    StatusBar(
+                        laneInfo = laneInfo,
+                        vehicleDistance = vehicleDistance,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 48.dp)
+                    )
 
-                FloatingActionButton(
-                    onClick = { showVideoPicker = false },
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(16.dp),
-                    containerColor = MaterialTheme.colorScheme.surface
-                ) {
-                    Icon(Icons.Default.VideoLibrary, contentDescription = "Camera Mode", tint = Color.White)
+                    FloatingActionButton(
+                        onClick = { showVideoPicker = false },
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(16.dp),
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ) {
+                        Icon(Icons.Default.VideoLibrary, contentDescription = "Camera Mode", tint = Color.White)
+                    }
                 }
             }
             cameraPermissionState.status.isGranted -> {

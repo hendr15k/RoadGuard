@@ -147,10 +147,11 @@ class VideoMlAnalyzer(
             .addOnSuccessListener { detectedObjects ->
                 processVehicleResult(detectedObjects, imageHeight)
                 bitmapToRecycle.recycle()
-                    .addOnFailureListener { e ->
-                        // Detection failed for this frame - reset distance
-                        _vehicleDistance.value = null
-                    }
+            }
+            .addOnFailureListener { e ->
+                // Detection failed for this frame - reset distance
+                _vehicleDistance.value = null
+            }
     }
 
     private fun processVehicleResult(
