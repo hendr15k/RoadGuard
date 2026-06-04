@@ -675,8 +675,9 @@ class LaneDetector(
             } else null
         }
 
+        // Take the 25 most representative points (closest to bottom for ground calibration)
         val validPoints = if (points.size > 25) {
-            points.sortedByDescending { it.second }.take(25)
+            points.sortedBy { it.second }.take(25)
         } else points
 
         val n = validPoints.size

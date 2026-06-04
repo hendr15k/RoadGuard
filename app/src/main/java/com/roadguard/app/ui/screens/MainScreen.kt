@@ -61,14 +61,14 @@ fun MainScreen(
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPicker by remember { mutableStateOf(false) }
     val appContext = context.applicationContext
-    val videoAnalyzer = remember { VideoMlAnalyzer(appContext = appContext) }
+    val videoAnalyzer = remember(appContext) { VideoMlAnalyzer(appContext = appContext) }
 
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val activeWarning by viewModel.activeWarning.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
 
-    DisposableEffect(Unit) {
+    DisposableEffect(videoAnalyzer) {
         onDispose {
             videoAnalyzer.close()
         }
@@ -96,8 +96,8 @@ fun MainScreen(
     }
 
     LaunchedEffect(videoAnalyzer) {
-        videoAnalyzer.laneInfo.collect { laneInfo ->
-            laneInfo?.let { viewModel.updateLaneInfo(it) }
+        videoAnalyzer.laneInfo.collect { info ->
+            info?.let { viewModel.updateLaneInfo(it) }
         }
     }
 
@@ -110,11 +110,13 @@ fun MainScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         when {
             showVideoPicker && videoUri != null -> {
-                VideoPreview(
-                    videoUri = videoUri!!,
-                    modifier = Modifier.fillMaxSize(),
-                    videoAnalyzer = videoAnalyzer
-                )
+                val currentVideoUri = videoUri
+                if (currentVideoUri != null) {
+                    VideoPreview(
+                        videoUri = currentVideoUri,
+                        modifier = Modifier.fillMaxSize(),
+                        videoAnalyzer = videoAnalyzer
+                    )
 
                 LaneOverlay(
                     laneInfo = laneInfo,
@@ -195,9 +197,14 @@ fun MainScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(16.dp),
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = MaterialTheme.colorScheme.tertiary,
+            contentColor = MaterialTheme.colorScheme.onTertiary
         ) {
-            Text("", color = Color.White)
+            Icon(
+                imageVector = Icons.Default.Settings,
+                contentDescription = "Settings",
+                modifier = Modifier.size(32.dp)
+            )
         }
 
         if (showSettings) {
