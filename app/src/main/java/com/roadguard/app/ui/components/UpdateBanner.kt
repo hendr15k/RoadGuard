@@ -107,8 +107,13 @@ fun UpdateBanner(
                         onClick = {
                             try {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(state.updateInfo.downloadUrl))
-                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                context.startActivity(intent)
+                                // ACTION_VIEW ohne createChooser() → bei Geräten
+                                // ohne passenden Browser (Custom-ROM, China-Builds)
+                                // silent fail. Mit createChooser bekommt der User
+                                // zumindest eine App-Auswahl.
+                                val chooser = Intent.createChooser(intent, "Open in browser")
+                                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(chooser)
                             } catch (e: android.content.ActivityNotFoundException) {
                                 android.util.Log.e("UpdateBanner", "No activity to handle URL", e)
                             } catch (e: Exception) {
