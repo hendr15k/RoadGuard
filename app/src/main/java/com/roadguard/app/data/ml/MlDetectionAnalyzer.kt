@@ -172,8 +172,6 @@ class MlDetectionAnalyzer(
 
     @SuppressLint("UnsafeOptInUsageError")
     private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy) {
-        this.imageHeightPixels = imageProxy.height.toFloat()
-
         // close() läuft IMMER im onCompleteListener, nie synchron davor.
         // So vermeiden wir "trying to use closed ImageProxy"-Crashes, die
         // auftreten, wenn ML Kit noch auf die underlying mediaImage-Buffer
