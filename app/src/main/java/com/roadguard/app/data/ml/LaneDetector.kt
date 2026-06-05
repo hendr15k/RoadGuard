@@ -143,6 +143,7 @@ class LaneDetector(
         }
 
         val gray = gaussianBlur5x5(rawGray, targetW, targetH)
+        lastBirdGray = gray  // Stash for adaptive VP detection in next computePerspectiveMatrix
 
         computePerspectiveMatrix(targetW, targetH)
         
@@ -243,6 +244,7 @@ class LaneDetector(
         }
 
         val gray = gaussianBlur5x5(rawGray, targetW, targetH)
+        lastBirdGray = gray
 
         if (targetH >= 3 && targetW >= 3) {
             for (y in 1 until targetH - 1) {
@@ -349,9 +351,10 @@ class LaneDetector(
     private fun computePerspectiveMatrix(w: Int, h: Int) {
         // Source points: trapezoid in the camera image defining the road region
         // Top edge is the vanishing-point horizon, bottom edge is the hood
+        val vpY = detectVanishingPoint(w, h)
         val srcPoints = floatArrayOf(
-            w * 0.42f, h * 0.55f,
-            w * 0.58f, h * 0.55f,
+            w * 0.42f, vpY,
+            w * 0.58f, vpY,
             w * 0.95f, h * 0.98f,
             w * 0.05f, h * 0.98f
         )
@@ -380,6 +383,46 @@ class LaneDetector(
             inverseMatrixValid = false
         }
     }
+
+    /**
+     * Estimate the vanishing-point y-coordinate by sampling horizontal gradient
+     * distribution across image rows. The row with the most symmetric gradient
+     * pattern is likely the horizon. Clamped to [0.35h, 0.65h] to avoid nonsense
+     * on noisy frames.
+     */
+    private fun detectVanishingPoint(w: Int, h: Int): Float {
+        val lo = (h * 0.35f).toInt()
+        val hi = (h * 0.65f).toInt()
+        val midX = w / 2
+        var bestRow = (h * 0.55f).toInt()
+        var bestScore = Float.MIN_VALUE
+
+        for (y in lo until hi step 3) {
+            // Symmetry score: sum of edge pixels in left half should equal right half
+            var leftCount = 0
+            var rightCount = 0
+            for (x in 1 until w - 1) {
+                if (lastBirdGray == null) continue
+                val idx = y * w + x
+                if (idx >= lastBirdGray!!.size) continue
+                val edge = lastBirdGray!![idx]
+                if (x < midX) leftCount += edge else rightCount += edge
+            }
+            val symmetry = 1f - abs(leftCount - rightCount).toFloat() /
+                max(leftCount + rightCount, 1)
+            // Edge density peaks near the horizon
+            val density = (leftCount + rightCount).toFloat() / w
+            val score = symmetry * density
+
+            if (score > bestScore) {
+                bestScore = score
+                bestRow = y
+            }
+        }
+        return bestRow.toFloat().coerceIn(h * 0.35f, h * 0.65f)
+    }
+
+    private var lastBirdGray: IntArray? = null
 
     /**
      * Invert a 3x3 row-major matrix encoded as FloatArray(9).
