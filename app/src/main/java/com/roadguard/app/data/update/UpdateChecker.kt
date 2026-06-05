@@ -57,7 +57,7 @@ class UpdateChecker(context: Context) {
                     _updateState.value = UpdateState.UpdateAvailable(
                         UpdateInfo(
                             tagName = release.tagName,
-                            versionName = release.name.ifEmpty { release.tagName },
+                            versionName = release.name.orEmpty().ifEmpty { release.tagName },
                             releaseNotes = release.body ?: "New version available",
                             downloadUrl = release.htmlUrl,
                             isNewer = true
@@ -68,7 +68,7 @@ class UpdateChecker(context: Context) {
                     _updateState.value = UpdateState.UpdateAvailable(
                         UpdateInfo(
                             tagName = release.tagName,
-                            versionName = release.name.ifEmpty { release.tagName },
+                            versionName = release.name.orEmpty().ifEmpty { release.tagName },
                             releaseNotes = release.body ?: "New version available",
                             downloadUrl = release.htmlUrl,
                             isNewer = true
@@ -101,15 +101,17 @@ class UpdateChecker(context: Context) {
 
     fun resetDismissed() {
         val currentState = _updateState.value
+        // Ein Editor für alle Removes (vorher: N Editor-Instanzen,
+        // N apply()-Calls in einer forEach-Loop → N Disk-IO-Operationen).
+        val editor = prefs.edit()
         if (currentState is UpdateState.UpdateAvailable) {
-            prefs.edit()
-                .remove("${KEY_UPDATE_DISMISSED}_${currentState.updateInfo.tagName}")
-                .apply()
+            editor.remove("${KEY_UPDATE_DISMISSED}_${currentState.updateInfo.tagName}")
         } else {
             prefs.all.keys
                 .filter { it.startsWith(KEY_UPDATE_DISMISSED) }
-                .forEach { key -> prefs.edit().remove(key).apply() }
+                .forEach { key -> editor.remove(key) }
         }
+        editor.apply()
         _updateState.value = UpdateState.Idle
     }
 
