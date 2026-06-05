@@ -15,6 +15,14 @@ import kotlin.math.sqrt
 class LaneDetector(
     private val sensitivity: Float = 0.5f
 ) {
+    /** 4-tuple of floats — used for (a, b, c, points) when returning a fitted polynomial. */
+    private data class Quad(
+        val a: Float,
+        val b: Float,
+        val c: Float,
+        val points: List<Pair<Float, Float>>
+    )
+
     data class LaneLine(
         val x1: Float, val y1: Float,
         val x2: Float, val y2: Float,
@@ -57,6 +65,44 @@ class LaneDetector(
     private var lastRightValid = false
     
     private val perspectiveMatrix = FloatArray(9)
+    private val inversePerspectiveMatrix = FloatArray(9)
+    private var inverseMatrixValid = false
+
+    /**
+     * Kalman-filtered smoothing for polynomial coefficients. Each coefficient (a, b, c)
+     * is tracked as a scalar with constant-velocity model. Better than EMA because it
+     * adapts to measurement noise and rejects outliers.
+     */
+    private class CoeffKalman(initial: Float) {
+        var value: Float = initial
+        private var velocity: Float = 0f
+        private var p: Float = 1f
+        private val q: Float = 0.002f   // process noise
+        private val r: Float = 8f       // measurement noise (pixel units)
+
+        fun update(measurement: Float): Float {
+            // Predict
+            value += velocity
+            p += q
+            // Update
+            val k = p / (p + r)
+            val innovation = measurement - value
+            value += k * innovation
+            velocity = 0.7f * velocity + 0.3f * k * innovation
+            p *= (1f - k)
+            return value
+        }
+
+        fun reset(v: Float = 0f) { value = v; velocity = 0f; p = 1f }
+    }
+
+    private val leftCoeffA = CoeffKalman(0f)
+    private val leftCoeffB = CoeffKalman(0f)
+    private val leftCoeffC = CoeffKalman(0f)
+    private val rightCoeffA = CoeffKalman(0f)
+    private val rightCoeffB = CoeffKalman(0f)
+    private val rightCoeffC = CoeffKalman(0f)
+    private var kalmanPrimed = false
 
     fun detectLanes(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): LaneDetectionResult {
         frameCounter++
@@ -295,27 +341,82 @@ class LaneDetector(
         rightXHistory.clear()
         lastLeftValid = false
         lastRightValid = false
+        leftCoeffA.reset(); leftCoeffB.reset(); leftCoeffC.reset()
+        rightCoeffA.reset(); rightCoeffB.reset(); rightCoeffC.reset()
+        kalmanPrimed = false
     }
 
     private fun computePerspectiveMatrix(w: Int, h: Int) {
+        // Source points: trapezoid in the camera image defining the road region
+        // Top edge is the vanishing-point horizon, bottom edge is the hood
         val srcPoints = floatArrayOf(
             w * 0.42f, h * 0.55f,
             w * 0.58f, h * 0.55f,
             w * 0.95f, h * 0.98f,
             w * 0.05f, h * 0.98f
         )
-        
+
+        // Destination: rectangle in bird's-eye view (top-down)
         val dstPoints = floatArrayOf(
             w * 0.15f, h * 0.0f,
             w * 0.85f, h * 0.0f,
             w * 0.85f, h * 1.0f,
             w * 0.15f, h * 1.0f
         )
-        
+
         val (matrix, _) = computeHomography(srcPoints, dstPoints)
         for (i in matrix.indices) {
             perspectiveMatrix[i] = matrix[i]
         }
+
+        // Compute and cache the inverse — needed to project detected BEV lanes
+        // back into the camera frame for AR overlay.
+        val inv = invert3x3(perspectiveMatrix)
+        if (inv != null) {
+            System.arraycopy(inv, 0, inversePerspectiveMatrix, 0, 9)
+            inverseMatrixValid = true
+        } else {
+            // Forward matrix is singular; AR projection disabled (overlay will fall back)
+            inverseMatrixValid = false
+        }
+    }
+
+    /**
+     * Invert a 3x3 row-major matrix encoded as FloatArray(9).
+     * Returns null if the determinant is too close to zero (singular).
+     */
+    private fun invert3x3(m: FloatArray): FloatArray? {
+        val a = m[0]; val b = m[1]; val c = m[2]
+        val d = m[3]; val e = m[4]; val f = m[5]
+        val g = m[6]; val h = m[7]; val i = m[8]
+        val det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+        if (abs(det) < 1e-6f) return null
+        val invDet = 1f / det
+        return floatArrayOf(
+            (e * i - f * h) * invDet,
+            (c * h - b * i) * invDet,
+            (b * f - c * e) * invDet,
+            (f * g - d * i) * invDet,
+            (a * i - c * g) * invDet,
+            (c * d - a * f) * invDet,
+            (d * h - e * g) * invDet,
+            (b * g - a * h) * invDet,
+            (a * e - b * d) * invDet
+        )
+    }
+
+    /**
+     * Map a single point from BEV (bird's-eye-view) coordinates back to the
+     * original camera/perspective coordinates. Used to draw lanes in AR.
+     */
+    private fun mapBevToPerspective(bevX: Float, bevY: Float): Pair<Float, Float> {
+        if (!inverseMatrixValid) return Pair(bevX, bevY)
+        val m = inversePerspectiveMatrix
+        val w = m[6] * bevX + m[7] * bevY + m[8]
+        if (abs(w) < 1e-6f) return Pair(bevX, bevY)
+        val px = (m[0] * bevX + m[1] * bevY + m[2]) / w
+        val py = (m[3] * bevX + m[4] * bevY + m[5]) / w
+        return Pair(px, py)
     }
 
     private fun computeHomography(src: FloatArray, dst: FloatArray): Pair<FloatArray, Boolean> {
@@ -680,29 +781,45 @@ class LaneDetector(
             points.sortedBy { it.second }.take(25)
         } else points
 
-        val n = validPoints.size
-        var sumX = 0.0
-        var sumY = 0.0
-        var sumX2 = 0.0
-        var sumXY = 0.0
-        var sumY2 = 0.0
+        // === Fit polynomial in BEV space (RANSAC-robust) ===
+        val (aBev, bBev, cBev) = fitPolynomialRansac(validPoints) ?: Triple(0f, 0f, 0f)
 
-        for ((x, y) in validPoints) {
-            sumX += x
-            sumY += y
-            sumX2 += x * x.toDouble()
-            sumXY += x * y.toDouble()
-            sumY2 += y * y.toDouble()
+        // === Project BEV curve back into camera/perspective space ===
+        // Sample N points along the BEV curve, apply the inverse homography to each,
+        // refit a polynomial in perspective coordinates. This is what the AR overlay
+        // needs to render lanes *on the road* instead of as a top-down projection.
+        val perspectiveSamples = sampleAndProjectToPerspective(
+            aBev, bBev, cBev, yStartF = roiTop.toFloat(), yEndF = roiBottom.toFloat()
+        )
+
+        // Fall back to BEV-space points only when projection completely failed.
+        val (aRaw, bRaw, cRaw) = if (perspectiveSamples.size >= 4) {
+            val fit = fitLinear(perspectiveSamples)
+            Triple(fit.first, fit.second, fit.third)
+        } else {
+            Triple(aBev, bBev, cBev)
         }
 
-        val denom = n * sumY2 - sumY * sumY
-        if (abs(denom) < 1.0) return null
-
-        val bLinear = ((n * sumXY - sumX * sumY) / denom).toFloat()
-        val cLinear = ((sumX - bLinear * sumY) / n).toFloat()
-
-        val polyFit = fitPolynomial(validPoints, w)
-        val (a, bCoef, cCoef) = if (polyFit != null) polyFit else Triple(0f, bLinear, cLinear)
+        // === Kalman temporal smoothing ===
+        // First valid frame on each side primes the filter; subsequent frames update.
+        // Smoothing on polynomial coefficients (a, b, c) is more stable than smoothing
+        // the line endpoints because coefficients are invariant to vertical translation
+        // of the curve.
+        val kfA = if (isLeft) leftCoeffA else rightCoeffA
+        val kfB = if (isLeft) leftCoeffB else rightCoeffB
+        val kfC = if (isLeft) leftCoeffC else rightCoeffC
+        val a: Float
+        val bCoef: Float
+        val cCoef: Float
+        if (!kalmanPrimed) {
+            kfA.reset(aRaw); kfB.reset(bRaw); kfC.reset(cRaw)
+            a = aRaw; bCoef = bRaw; cCoef = cRaw
+            kalmanPrimed = true
+        } else {
+            a = kfA.update(aRaw)
+            bCoef = kfB.update(bRaw)
+            cCoef = kfC.update(cRaw)
+        }
 
         val yStartF = roiTop.toFloat()
         val yEndF = roiBottom.toFloat()
@@ -781,6 +898,10 @@ class LaneDetector(
         val dx = nx2 - nx1
         val dy = ny2 - ny1
         val newLength = sqrt(dx * dx + dy * dy)
+        // For the polynomial x = a·y² + b·y + c, when we scale (x,y) → (x·sX, y·sY),
+        // substituting y = y'/sY and multiplying through by sX gives:
+        //   x' = (a·sX/sY²)·y'² + (b·sX/sY)·y' + c·sX
+        val sYs = scaleY * scaleY
         return LaneLine(
             x1 = nx1,
             y1 = ny1,
@@ -790,9 +911,9 @@ class LaneDetector(
             length = newLength,
             curvature = line.curvature / scaleX,
             valid = line.valid,
-            polyA = line.polyA,
-            polyB = line.polyB / scaleX,
-            polyC = line.polyC,
+            polyA = line.polyA * scaleX / sYs,
+            polyB = line.polyB * scaleX / scaleY,
+            polyC = line.polyC * scaleX,
             yStart = line.yStart * scaleY,
             yEnd = line.yEnd * scaleY
         )
@@ -856,6 +977,105 @@ class LaneDetector(
             val ccoef = sol[0].toFloat()
             if (abs(a) > 0.5f) null else Triple(a, bcoef, ccoef)
         }
+    }
+
+    /**
+     * RANSAC-style robust polynomial fit: x = a·y² + b·y + c, with y as independent
+     * variable (lane pixels stack vertically in the image).
+     *
+     * Outliers (shadows, road markings, vehicles partially occluding the lane) are
+     * rejected by sampling subsets, fitting, and keeping the model with the most
+     * inliers. Final coefficients are re-estimated from the inliers via least squares.
+     */
+    private fun fitPolynomialRansac(points: List<Pair<Int, Int>>): Triple<Float, Float, Float>? {
+        if (points.size < 4) return null
+
+        val n = points.size
+        val maxIterations = 25
+        val inlierThreshold = 6f  // pixels
+        val subsetSize = 4
+        val rng = java.util.Random()  // NOT seeded — jitter helps avoid degenerate draws
+
+        var bestInliers: List<Pair<Float, Float>> = emptyList()
+        var bestCoef: Triple<Float, Float, Float>? = null
+
+        repeat(maxIterations) {
+            // Sample subset
+            val subset = if (n <= subsetSize) {
+                points.map { Pair(it.first.toFloat(), it.second.toFloat()) }
+            } else {
+                val picked = HashSet<Int>(subsetSize)
+                while (picked.size < subsetSize) picked.add(rng.nextInt(n))
+                picked.map { points[it] }.map { Pair(it.first.toFloat(), it.second.toFloat()) }
+            }
+
+            val candidate = fitLinear(subset) ?: return@repeat
+
+            // Count inliers across all points
+            val inliers = points.mapNotNull { (x, y) ->
+                val px = candidate.first * y * y + candidate.second * y + candidate.third
+                if (abs(px - x) < inlierThreshold) Pair(x.toFloat(), y.toFloat()) else null
+            }
+
+            if (inliers.size > bestInliers.size) {
+                bestInliers = inliers
+                bestCoef = candidate
+            }
+        }
+
+        // Refit using all inliers; fall back to first subset if RANSAC didn't help
+        return if (bestInliers.size >= 4) fitLinear(bestInliers) else bestCoef
+    }
+
+    /**
+     * Simple linear regression: x = b·y + c (a=0). Solved via the normal equations.
+     * Used as a building block for RANSAC and for refitting after inverse projection.
+     */
+    private fun fitLinear(points: List<Pair<Float, Float>>): Triple<Float, Float, Float>? {
+        if (points.size < 3) return null
+        val n = points.size
+        var sumX = 0.0
+        var sumY = 0.0
+        var sumY2 = 0.0
+        var sumXY = 0.0
+        for ((x, y) in points) {
+            sumX += x
+            sumY += y
+            sumY2 += y * y
+            sumXY += x * y
+        }
+        val denom = n * sumY2 - sumY * sumY
+        if (abs(denom) < 1.0) return null
+        val b = ((n * sumXY - sumX * sumY) / denom).toFloat()
+        val c = ((sumX - b * sumY) / n).toFloat()
+        return Triple(0f, b, c)
+    }
+
+    /**
+     * Sample N evenly-spaced points along the BEV curve x = a·y² + b·y + c, then
+     * apply the inverse homography to each. The result is the same lane shape,
+     * expressed in the original camera/perspective frame — exactly what the AR
+     * overlay needs to draw the lane *on the road*.
+     */
+    private fun sampleAndProjectToPerspective(
+        a: Float, b: Float, c: Float,
+        yStartF: Float, yEndF: Float,
+        samples: Int = 24
+    ): List<Pair<Float, Float>> {
+        if (yEndF <= yStartF) return emptyList()
+        if (!inverseMatrixValid) return emptyList()
+        val out = ArrayList<Pair<Float, Float>>(samples)
+        val dy = (yEndF - yStartF) / (samples - 1).coerceAtLeast(1)
+        for (i in 0 until samples) {
+            val y = yStartF + i * dy
+            val xBev = a * y * y + b * y + c
+            val (px, py) = mapBevToPerspective(xBev, y)
+            // Reject points that fell outside the source image bounds
+            if (px.isFinite() && py.isFinite() && px > -1e3f && py > -1e3f) {
+                out.add(Pair(px, py))
+            }
+        }
+        return out
     }
 
     private fun solve3x3(m: Array<DoubleArray>, b: DoubleArray): DoubleArray? {
