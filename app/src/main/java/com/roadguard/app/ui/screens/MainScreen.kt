@@ -62,18 +62,22 @@ fun MainScreen(
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPicker by remember { mutableStateOf(false) }
     val appContext = context.applicationContext
-    val videoAnalyzer = remember(appContext) { VideoMlAnalyzer(appContext = appContext) }
+    // VideoMlAnalyzer wird nur erzeugt wenn der User tatsächlich ein Video
+    // auswählt. Frühere Implementierung erzeugte ihn immer (und damit
+    // ObjectDetector + TFLite Interpreter + Speicher), auch im Live-Modus.
+    val videoAnalyzer = remember(showVideoPicker) {
+        if (showVideoPicker) VideoMlAnalyzer(appContext = appContext) else null
+    }
+    DisposableEffect(videoAnalyzer) {
+        onDispose {
+            videoAnalyzer?.close()
+        }
+    }
 
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val activeWarning by viewModel.activeWarning.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
-
-    DisposableEffect(videoAnalyzer) {
-        onDispose {
-            videoAnalyzer.close()
-        }
-    }
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -96,15 +100,18 @@ fun MainScreen(
         }
     }
 
+    // === Video-Modus: eine Pipeline, die laneInfo UND vehicleDistance sammelt ===
+    // Frühere Implementierung hatte ZWEI separate LaunchedEffect(videoAnalyzer)-
+    // Blöcke mit dem gleichen Key. LaunchedEffect mit identischem Key
+    // collected SEQUENZIELL — d.h. der zweite Block wurde nie ausgeführt, weil
+    // der erste endlos läuft. vehicleDistance aus dem Video-Modus erreichte
+    // das ViewModel also nie.
     LaunchedEffect(videoAnalyzer) {
-        videoAnalyzer.laneInfo.collect { info ->
-            info?.let { viewModel.updateLaneInfo(it) }
-        }
-    }
-
-    LaunchedEffect(videoAnalyzer) {
-        videoAnalyzer.vehicleDistance.collect { distance ->
-            distance?.let { viewModel.updateVehicleDistance(it) }
+        val analyzer = videoAnalyzer ?: return@LaunchedEffect
+        // merge: collect BEIDE Flows parallel mit coroutineScope.
+        kotlinx.coroutines.coroutineScope {
+            launch { analyzer.laneInfo.collect { info -> info?.let { viewModel.updateLaneInfo(it) } } }
+            launch { analyzer.vehicleDistance.collect { d -> d?.let { viewModel.updateVehicleDistance(it) } } }
         }
     }
 
@@ -235,48 +242,64 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    val mlAnalyzer = remember { MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext) }
-    val cameraProvider = remember { ProcessCameraProvider.getInstance(context) }
-    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    // Key mit appContext: bei Context-Wechsel (z.B. Config-Change mit DI-Swap)
+    // wird der Analyzer sauber neu erzeugt. Mit Unit oder ohne Key würde
+    // der alte Analyzer geleaked.
+    val mlAnalyzer = remember(appContext) {
+        MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext)
+    }
 
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    val previewView = remember {
+        PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+    }
+
+    // === Parallele Collectors (eine Pipeline, nicht zwei) ===
+    // Gleicher Bug wie in MainScreen: zwei separate LaunchedEffect(mlAnalyzer)-
+    // Blöcke mit identischem Key → sequenziell → der zweite lief nie.
     LaunchedEffect(mlAnalyzer) {
-        mlAnalyzer.laneInfo.collect { laneInfo ->
-            laneInfo?.let { onLaneUpdate(it) }
+        kotlinx.coroutines.coroutineScope {
+            launch { mlAnalyzer.laneInfo.collect { laneInfo -> laneInfo?.let { onLaneUpdate(it) } } }
+            launch { mlAnalyzer.vehicleDistance.collect { d -> d?.let { onDistanceUpdate(it) } } }
         }
     }
 
-    LaunchedEffect(mlAnalyzer) {
-        mlAnalyzer.vehicleDistance.collect { distance ->
-            distance?.let { onDistanceUpdate(it) }
-        }
-    }
+    DisposableEffect(lifecycleOwner, mlAnalyzer) {
+        // addListener ist non-blocking (callback auf Main-Executor).
+        // Vorher wurde cameraProviderFuture.get() direkt aufgerufen — das
+        // ist blockierend und kann auf langsamen Devices ANR verursachen.
+        val mainExecutor = ContextCompat.getMainExecutor(context)
+        val listener = Runnable {
+            try {
+                val cameraProviderInstance = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .build()
+                    .also { it.setAnalyzer(mainExecutor, mlAnalyzer) }
 
-    DisposableEffect(lifecycleOwner) {
-        val cameraProviderInstance = cameraProvider.get()
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView.surfaceProvider)
+                cameraProviderInstance.unbindAll()
+                cameraProviderInstance.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    imageAnalysis
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
-
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-            .build()
-            .also { it.setAnalyzer(ContextCompat.getMainExecutor(context), mlAnalyzer) }
-
-        try {
-            cameraProviderInstance.unbindAll()
-            cameraProviderInstance.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                imageAnalysis
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        cameraProviderFuture.addListener(listener, mainExecutor)
 
         onDispose {
-            cameraProviderInstance.unbindAll()
+            try {
+                cameraProviderFuture.get().unbindAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
             mlAnalyzer.close()
         }
     }
@@ -377,14 +400,14 @@ fun ForwardCollisionWarning(
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "%.1f m".format(distance),
+            text = String.format(java.util.Locale.US, "%.1f m", distance),
             color = Color.White,
             style = MaterialTheme.typography.titleLarge
         )
         if (ttc < 60f) {
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "TTC: %.1f s".format(ttc),
+                text = String.format(java.util.Locale.US, "TTC: %.1f s", ttc),
                 color = Color.White,
                 style = MaterialTheme.typography.bodyLarge
             )
@@ -436,7 +459,7 @@ fun StatusBar(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("OFFSET", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Text(
-                    "%.0fpx".format(laneInfo.centerOffset),
+                    String.format(java.util.Locale.US, "%.0fpx", laneInfo.centerOffset),
                     color = when {
                         kotlin.math.abs(laneInfo.centerOffset) > 50f -> DangerRed
                         kotlin.math.abs(laneInfo.centerOffset) > 25f -> WarningYellow
@@ -451,7 +474,7 @@ fun StatusBar(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("DIST", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
             Text(
-                vehicleDistance?.distanceMeters?.let { "%.1fm".format(it) } ?: "--",
+                vehicleDistance?.distanceMeters?.let { String.format(java.util.Locale.US, "%.1fm", it) } ?: "--",
                 color = when {
                     vehicleDistance == null -> Color.Gray
                     vehicleDistance.distanceMeters < 15f -> DangerRed
@@ -467,7 +490,7 @@ fun StatusBar(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("TTC", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Text(
-                    "%.1fs".format(vehicleDistance.timeToCollision),
+                    String.format(java.util.Locale.US, "%.1fs", vehicleDistance.timeToCollision),
                     color = when {
                         vehicleDistance.timeToCollision < 2f -> DangerRed
                         vehicleDistance.timeToCollision < 4f -> WarningYellow
