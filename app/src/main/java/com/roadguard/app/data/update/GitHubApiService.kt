@@ -3,12 +3,18 @@ package com.roadguard.app.data.update
 import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+import javax.inject.Inject
+import javax.inject.Singleton
 
-class GitHubApiService(private val context: Context) {
+@Singleton
+class GitHubApiService @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
 
     companion object {
         private const val TAG = "GitHubApiService"

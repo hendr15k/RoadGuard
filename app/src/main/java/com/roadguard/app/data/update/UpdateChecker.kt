@@ -3,11 +3,17 @@ package com.roadguard.app.data.update
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import javax.inject.Inject
+import javax.inject.Singleton
 
-class UpdateChecker(context: Context) {
+@Singleton
+class UpdateChecker @Inject constructor(
+    @ApplicationContext context: Context
+) {
 
     companion object {
         private const val TAG = "UpdateChecker"
