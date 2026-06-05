@@ -3,21 +3,47 @@ package com.roadguard.app.data.update
 import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+import javax.inject.Inject
+import javax.inject.Singleton
 
-class GitHubApiService(private val context: Context) {
+@Singleton
+class GitHubApiService @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
 
     companion object {
         private const val TAG = "GitHubApiService"
-        private const val RELEASES_URL = "https://api.github.com/repos/hendr15k/RoadGuard/releases"
+        // ?per_page=1: nur das aktuellste Release holen. Spart Bandbreite
+        // (war: alle Releases als JSON-Array) und Parsing-Zeit.
+        private const val RELEASES_URL = "https://api.github.com/repos/hendr15k/RoadGuard/releases?per_page=1"
     }
 
     private val gson = Gson()
 
+    /**
+     * Timestamp bis zu dem kein erneuter API-Call gemacht werden soll
+     * (GitHub Rate-Limit 403-Handling). In Memory gehalten, geht beim
+     * App-Restart verloren — dann ist der Backoff nur eine Session lang,
+     * das ist akzeptabel.
+     */
+    @Volatile
+    private var rateLimitUntilMs: Long = 0L
+
     suspend fun getLatestRelease(): Result<GitHubRelease> = withContext(Dispatchers.IO) {
+        // Backoff-Check: wenn 403 noch "aktiv" ist, gar nicht erst versuchen.
+        val now = System.currentTimeMillis()
+        if (now < rateLimitUntilMs) {
+            val remainingSec = (rateLimitUntilMs - now) / 1000
+            return@withContext Result.failure(
+                Exception("Rate limited. Try again in $remainingSec seconds.")
+            )
+        }
+
         val connection = try {
             val url = URL(RELEASES_URL)
             url.openConnection() as HttpURLConnection
@@ -36,7 +62,8 @@ class GitHubApiService(private val context: Context) {
             val responseCode = connection.responseCode
             if (responseCode == 403) {
                 val retryAfter = connection.getHeaderField("Retry-After")?.toLongOrNull() ?: 60L
-                Log.w(TAG, "Rate limited. Retry after: $retryAfter seconds")
+                rateLimitUntilMs = System.currentTimeMillis() + retryAfter * 1000L
+                Log.w(TAG, "Rate limited. Retry after: $retryAfter seconds (backoff until ${rateLimitUntilMs})")
                 return@withContext Result.failure(Exception("Rate limited. Try again in $retryAfter seconds."))
             }
 

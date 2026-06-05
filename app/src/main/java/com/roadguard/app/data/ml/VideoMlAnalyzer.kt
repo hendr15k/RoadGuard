@@ -216,10 +216,10 @@ class VideoMlAnalyzer(
             val gapSec = if (prevTime > 0) (currentTime - prevTime) / 1000f else 0f
             if (gapSec > 1.5f) {
                 distanceHistory.clear()
-                prevDistance = null
             }
             if (gapSec > 3f) {
                 _vehicleDistance.value = null
+                prevTime = 0L
             }
         }
     }

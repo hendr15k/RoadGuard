@@ -50,7 +50,6 @@ class MlDetectionAnalyzer(
     // Camera parameters (approximate for typical smartphone)
     private var focalLengthPixels = 1500f // More accurate default for ~1080p smartphones
     private val vehicleHeightMeters = 1.5f // Average car height
-    private var imageHeightPixels = 1080f // Will be updated
 
     @Volatile
     private var closed = false
@@ -80,7 +79,17 @@ class MlDetectionAnalyzer(
         lastProcessTime = currentTime
 
         val mediaImage = imageProxy.image
-        if (mediaImage != null) {
+        if (mediaImage == null) {
+            imageProxy.close()
+            return
+        }
+
+        // === ImageProxy-Lifecycle: WICHTIG ===
+        // ML Kit ObjectDetector ist async. Wenn wir imageProxy.close() synchron
+        // aufrufen würden, wäre die darunterliegende native Memory weg, bevor
+        // ML Kit seine Task abschließt → "trying to use closed ImageProxy" Crash.
+        // Daher: close() in onCompleteListener, NACHDEM die Task gelaufen ist.
+        try {
             val inputImage = InputImage.fromMediaImage(
                 mediaImage,
                 imageProxy.imageInfo.rotationDegrees
@@ -90,6 +99,9 @@ class MlDetectionAnalyzer(
             val uBuffer = mediaImage.planes[1].buffer
             val vBuffer = mediaImage.planes[2].buffer
 
+            // Buffer-Read für YUV-LaneDetector: Snapshot der Größe VOR dem Read
+            // weil `remaining()` während des Lesens abnimmt und die LaneDetector-
+            // Logik darauf angewiesen ist, dass der Buffer bei Eintritt voll ist.
             val yData = ByteArray(yBuffer.remaining())
             yBuffer.rewind()
             yBuffer.get(yData)
@@ -135,40 +147,50 @@ class MlDetectionAnalyzer(
                 laneWidth = swResult.laneWidth,
                 leftLaneVisible = swResult.leftLane != null,
                 rightLaneVisible = swResult.rightLane != null,
-                leftCurve = swResult.leftLane?.let { l ->
-                    com.roadguard.app.domain.model.LaneCurve(
-                        a = l.polyA, b = l.polyB, c = l.polyC,
-                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
-                    )
-                } ?: com.roadguard.app.domain.model.LaneCurve(),
-                rightCurve = swResult.rightLane?.let { l ->
-                    com.roadguard.app.domain.model.LaneCurve(
-                        a = l.polyA, b = l.polyB, c = l.polyC,
-                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
-                    )
-                } ?: com.roadguard.app.domain.model.LaneCurve(),
+                leftCurve = toDomainCurve(swResult.leftLane),
+                rightCurve = toDomainCurve(swResult.rightLane),
                 imageWidth = swResult.imageWidth,
                 imageHeight = swResult.imageHeight
             )
 
-            detectVehicles(inputImage, imageProxy.height)
-
-            imageProxy.close()
-        } else {
+            detectVehicles(inputImage, imageProxy)
+        } catch (e: Exception) {
+            // Wenn der synchrone Teil (LaneDetector etc.) crasht, müssen wir
+            // trotzdem close() aufrufen, sonst hängt der CameraX-Frame-Queue.
+            e.printStackTrace()
             imageProxy.close()
         }
     }
 
+    private fun toDomainCurve(lane: LaneDetector.LaneLine?) =
+        lane?.let {
+            com.roadguard.app.domain.model.LaneCurve(
+                a = it.polyA, b = it.polyB, c = it.polyC,
+                yStart = it.yStart, yEnd = it.yEnd, valid = it.valid
+            )
+        } ?: com.roadguard.app.domain.model.LaneCurve()
+
     @SuppressLint("UnsafeOptInUsageError")
-    private fun detectVehicles(inputImage: InputImage, imageHeight: Int) {
-        this.imageHeightPixels = imageHeight.toFloat()
-        
+    private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy) {
+        this.imageHeightPixels = imageProxy.height.toFloat()
+
+        // close() läuft IMMER im onCompleteListener, nie synchron davor.
+        // So vermeiden wir "trying to use closed ImageProxy"-Crashes, die
+        // auftreten, wenn ML Kit noch auf die underlying mediaImage-Buffer
+        // zugreift während wir sie schon zurückgeben.
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
-                processVehicleResult(detectedObjects, imageHeight)
+                processVehicleResult(detectedObjects, imageProxy.height)
             }
             .addOnFailureListener {
                 _vehicleDistance.value = null
+            }
+            .addOnCompleteListener {
+                try {
+                    if (!closed) imageProxy.close()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
     }
 
@@ -230,14 +252,19 @@ class MlDetectionAnalyzer(
                 timestamp = currentTime
             )
         } else {
+            // Kein Vehicle in diesem Frame. prevTime wird BEWUSST nicht
+            // aktualisiert, damit der nächste Frame mit echtem Vehicle
+            // die Zeitdifferenz korrekt messen kann. Wenn jedoch lange
+            // kein Vehicle erkannt wird, soll die History gecleart
+            // werden, um stale Distanzen zu verwerfen.
             val currentTime = System.currentTimeMillis()
             val gapSec = if (prevTime > 0) (currentTime - prevTime) / 1000f else 0f
             if (gapSec > 1.5f) {
                 distanceHistory.clear()
-                prevDistance = null
             }
             if (gapSec > 3f) {
                 _vehicleDistance.value = null
+                prevTime = 0L  // Reset, damit beim nächsten Vehicle die Lücke nicht "ewig" ist
             }
         }
     }

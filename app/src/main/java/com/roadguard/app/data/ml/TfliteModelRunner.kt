@@ -147,7 +147,15 @@ class TfliteModelRunner(private val context: Context) {
     }
 
     private fun preprocessBitmap(bitmap: Bitmap): ByteBuffer {
-        val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+        // createScaledBitmap gibt das Original-Bitmap UNVERÄNDERT zurück, wenn
+        // die Maße bereits passen. In dem Fall dürfen wir NICHT recyceln, weil
+        // der Aufrufer das Bitmap noch braucht (YUV-Pfad, Frame-Loop).
+        val needsScale = bitmap.width != inputSize || bitmap.height != inputSize
+        val resized = if (needsScale) {
+            Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+        } else {
+            bitmap
+        }
         val inputBuffer = ByteBuffer.allocateDirect(inputSize * inputSize * 3 * 4)
             .order(ByteOrder.nativeOrder())
 
@@ -163,14 +171,20 @@ class TfliteModelRunner(private val context: Context) {
             inputBuffer.putFloat(b)
         }
 
-        resized.recycle()
+        if (resized !== bitmap) resized.recycle()
         return inputBuffer
     }
 
     private fun yuvToBitmap(yPlane: ByteBuffer, uPlane: ByteBuffer, vPlane: ByteBuffer, width: Int, height: Int): Bitmap {
         return try {
-            val yRowStride = yPlane.remaining() / height
-            val uvRowStride = uPlane.remaining() / (height / 2)
+            // Stride-Safety: wenn der Buffer kleiner ist als erwartet, würden
+            // wir durch 0 teilen (Integer-Division) und danach Off-by-Many-
+            // Pixel lesen. coerceAtLeast(1) verhindert das.
+            val yRowStride = if (height > 0) (yPlane.remaining() / height).coerceAtLeast(1) else 1
+            val uvRowStride = if (height > 1) (uPlane.remaining() / (height / 2)).coerceAtLeast(1) else 1
+            val yPlaneSize = yPlane.remaining()
+            val uPlaneSize = uPlane.remaining()
+            val vPlaneSize = vPlane.remaining()
 
             val pixels = IntArray(width * height)
 
@@ -181,9 +195,9 @@ class TfliteModelRunner(private val context: Context) {
                     val uvY = y / 2
                     val uvIndex = uvY * uvRowStride + uvX
 
-                    val yVal = if (yIndex < yPlane.remaining()) yPlane.get(yIndex).toInt() and 0xFF else 0
-                    val uVal = if (uvIndex < uPlane.remaining()) uPlane.get(uvIndex).toInt() and 0xFF else 128
-                    val vVal = if (uvIndex < vPlane.remaining()) vPlane.get(uvIndex).toInt() and 0xFF else 128
+                    val yVal = if (yIndex < yPlaneSize) yPlane.get(yIndex).toInt() and 0xFF else 0
+                    val uVal = if (uvIndex < uPlaneSize) uPlane.get(uvIndex).toInt() and 0xFF else 128
+                    val vVal = if (uvIndex < vPlaneSize) vPlane.get(uvIndex).toInt() and 0xFF else 128
 
                     val r = (yVal + 1.402 * (vVal - 128)).toInt().coerceIn(0, 255)
                     val g = (yVal - 0.344136 * (uVal - 128) - 0.714136 * (vVal - 128)).toInt().coerceIn(0, 255)
@@ -196,7 +210,7 @@ class TfliteModelRunner(private val context: Context) {
             Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
         } catch (e: Exception) {
             e.printStackTrace()
-            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         }
     }
 
@@ -207,7 +221,14 @@ class TfliteModelRunner(private val context: Context) {
     fun isLoaded(): Boolean = interpreter != null
 
     fun close() {
-        interpreter?.close()
+        // Idempotent: zweiter close() darf nicht crashen, falls der
+        // Interpreter bereits disposed wurde.
+        val current = interpreter ?: return
         interpreter = null
+        try {
+            current.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }

@@ -63,11 +63,25 @@ fun SettingsBottomSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text("Minimum Following Distance: %.0f m".format(settings.minFollowingDistanceMeters))
+            // Slider mit onValueChangeFinished: SharedPrefs (und damit
+            // DataStore-Disk-IO) wird NUR am Ende des Drags geschrieben,
+            // nicht für jeden Pixel der Bewegung. Vorher: 30+ IO-Calls
+            // pro Sekunde Slider-Drag.
+            var sliderValue by remember(settings.minFollowingDistanceMeters) {
+                mutableStateOf(settings.minFollowingDistanceMeters)
+            }
+            Text(
+                String.format(
+                    java.util.Locale.US,
+                    "Minimum Following Distance: %.0f m",
+                    sliderValue
+                )
+            )
             Slider(
-                value = settings.minFollowingDistanceMeters,
-                onValueChange = {
-                    onSettingsUpdate(settings.copy(minFollowingDistanceMeters = it))
+                value = sliderValue,
+                onValueChange = { sliderValue = it },
+                onValueChangeFinished = {
+                    onSettingsUpdate(settings.copy(minFollowingDistanceMeters = sliderValue))
                 },
                 valueRange = 10f..50f,
                 steps = 7
