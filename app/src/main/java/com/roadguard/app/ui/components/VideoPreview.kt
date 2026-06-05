@@ -47,7 +47,10 @@ fun VideoPreview(
 ) {
     val context = LocalContext.current
     var isPlaying by remember { mutableStateOf(true) }
-    var frameProcessor by remember { mutableStateOf<Job?>(null) }
+    // Holder-Pattern: Job ist mutable, mutableStateOf<Job> triggert keine
+    // Recomposition (Job hat keine sinnvolle equals-Implementierung).
+    // Wir brauchen den Job nur intern zum Canceln, nicht als State.
+    val frameProcessorHolder = remember { object { var job: Job? = null } }
 
     val exoPlayer = remember(videoUri) {
         ExoPlayer.Builder(context).build().apply {
@@ -58,10 +61,14 @@ fun VideoPreview(
         }
     }
 
-    DisposableEffect(Unit) {
+    // Cleanup für ALLES, was mit dem ExoPlayer und dem FrameProcessor zu tun
+    // hat. Vorher: DisposableEffect(Unit) — der lief NUR beim ersten
+    // Disposal, NICHT bei videoUri-Wechsel. Resultat: alter ExoPlayer + alter
+    // FrameProcessor-Job wurden nie freigegeben.
+    DisposableEffect(exoPlayer) {
         onDispose {
-            frameProcessor?.cancel()
-            frameProcessor = null
+            frameProcessorHolder.job?.cancel()
+            frameProcessorHolder.job = null
             exoPlayer.release()
         }
     }
@@ -71,19 +78,19 @@ fun VideoPreview(
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
                 if (playing) {
-                    if (frameProcessor == null && videoAnalyzer != null) {
-                        frameProcessor = startFrameProcessing(context, exoPlayer, videoAnalyzer)
+                    if (frameProcessorHolder.job == null && videoAnalyzer != null) {
+                        frameProcessorHolder.job = startFrameProcessing(context, exoPlayer, videoAnalyzer)
                     }
                 } else {
-                    frameProcessor?.cancel()
-                    frameProcessor = null
+                    frameProcessorHolder.job?.cancel()
+                    frameProcessorHolder.job = null
                 }
             }
         }
         exoPlayer.addListener(listener)
 
-        if (exoPlayer.isPlaying && frameProcessor == null && videoAnalyzer != null) {
-            frameProcessor = startFrameProcessing(context, exoPlayer, videoAnalyzer)
+        if (exoPlayer.isPlaying && frameProcessorHolder.job == null && videoAnalyzer != null) {
+            frameProcessorHolder.job = startFrameProcessing(context, exoPlayer, videoAnalyzer)
         }
 
         onDispose {
@@ -129,7 +136,11 @@ private fun startFrameProcessing(
     exoPlayer: ExoPlayer,
     videoAnalyzer: VideoMlAnalyzer
 ): Job {
-    return CoroutineScope(Dispatchers.Default).launch {
+    // Eigener Scope mit SupervisorJob + Main-DispatchHandler, damit der Job
+    // beim Composable-Disposal sauber cancelled wird (via Dispatchers.Main
+    // immediate).
+    val scope = CoroutineScope(Dispatchers.Default + Job())
+    return scope.launch {
         val retriever = MediaMetadataRetriever()
         try {
             var retrieverInitialized = false
@@ -138,15 +149,21 @@ private fun startFrameProcessing(
             var lastFrameTime = 0L
 
             while (isActive) {
-                val currentPos = withContext(Dispatchers.Main) { exoPlayer.currentPosition }
-                val isPlaying = withContext(Dispatchers.Main) { exoPlayer.isPlaying }
+                // EIN withContext-Block pro Iteration statt 3 — spart
+                // Context-Switches (vorher: 3 Switches pro Loop-Iteration).
+                val (currentPos, isPlayingNow, currentUri) = withContext(Dispatchers.Main) {
+                    Triple(
+                        exoPlayer.currentPosition,
+                        exoPlayer.isPlaying,
+                        exoPlayer.currentMediaItem?.localConfiguration?.uri
+                    )
+                }
 
-                if (isPlaying) {
+                if (isPlayingNow) {
                     if (!retrieverInitialized) {
                         try {
-                            val uri = withContext(Dispatchers.Main) { exoPlayer.currentMediaItem?.localConfiguration?.uri }
-                            if (uri != null) {
-                                retriever.setDataSource(context, uri)
+                            if (currentUri != null) {
+                                retriever.setDataSource(context, currentUri)
                                 retrieverInitialized = true
                             }
                         } catch (e: Exception) {
@@ -165,12 +182,30 @@ private fun startFrameProcessing(
                                 MediaMetadataRetriever.OPTION_CLOSEST_SYNC
                             )
                             if (bitmap != null) {
-                                val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 640, 360, true)
-                                bitmap.recycle()
+                                // === Bitmap-Lifecycle fix ===
+                                // createScaledBitmap gibt das Original zurück
+                                // wenn die Maße passen — wir dürfen NICHT das
+                                // Original recyclen, weil ExoPlayer es noch
+                                // referenziert.
+                                val targetW = 640
+                                val targetH = 360
+                                val needsScale = bitmap.width != targetW || bitmap.height != targetH
+                                val scaledBitmap = if (needsScale) {
+                                    Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+                                } else {
+                                    bitmap
+                                }
+                                if (scaledBitmap !== bitmap) bitmap.recycle()
+
                                 val argbBitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, false)
                                 scaledBitmap.recycle()
-                                videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.width, argbBitmap.height)
-                                argbBitmap.recycle()
+                                if (argbBitmap != null) {
+                                    try {
+                                        videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.width, argbBitmap.height)
+                                    } finally {
+                                        argbBitmap.recycle()
+                                    }
+                                }
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("VideoPreview", "Frame extraction failed", e)
@@ -185,6 +220,7 @@ private fun startFrameProcessing(
             } catch (e: Exception) {
                 android.util.Log.e("VideoPreview", "Failed to release retriever", e)
             }
+            scope.cancel()
         }
     }
 }
