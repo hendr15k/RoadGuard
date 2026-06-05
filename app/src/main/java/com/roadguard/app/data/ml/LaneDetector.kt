@@ -837,8 +837,7 @@ class LaneDetector(
 
         // Fall back to BEV-space points only when projection completely failed.
         val (aRaw, bRaw, cRaw) = if (perspectiveSamples.size >= 4) {
-            val fit = fitLinear(perspectiveSamples)
-            Triple(fit.first, fit.second, fit.third)
+            fitLinear(perspectiveSamples) ?: Triple(0f, 0f, 0f)
         } else {
             Triple(aBev, bBev, cBev)
         }
