@@ -92,6 +92,10 @@ fun MainScreen(
         if (!cameraPermissionState.status.isGranted) {
             cameraPermissionState.launchPermissionRequest()
         }
+        // Trigger initial update check explicitly (replaces the old
+        // UpdateViewModel.init { checkForUpdates() } which caused
+        // double-fires on config-change VM recreation).
+        updateViewModel.checkForUpdates()
     }
 
     LaunchedEffect(activeWarning) {
