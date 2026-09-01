@@ -67,8 +67,9 @@ fun SettingsBottomSheet(
             // DataStore-Disk-IO) wird NUR am Ende des Drags geschrieben,
             // nicht für jeden Pixel der Bewegung. Vorher: 30+ IO-Calls
             // pro Sekunde Slider-Drag.
-            var sliderValue by remember(settings.minFollowingDistanceMeters) {
-                mutableStateOf(settings.minFollowingDistanceMeters)
+            var sliderValue by remember { mutableStateOf(settings.minFollowingDistanceMeters) }
+            LaunchedEffect(settings.minFollowingDistanceMeters) {
+                sliderValue = settings.minFollowingDistanceMeters
             }
             Text(
                 String.format(

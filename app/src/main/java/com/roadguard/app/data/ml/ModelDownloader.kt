@@ -103,7 +103,9 @@ class ModelDownloader(private val context: Context) {
     suspend fun downloadAllModels(): Map<String, Boolean> {
         val results = mutableMapOf<String, Boolean>()
         for (source in modelSources) {
-            val success = downloadModel(source.url)
+            val fileNameForSource = source.url.substringAfterLast("/").substringBefore("?")
+                .ifBlank { "${source.name.hashCode()}.tflite" }
+            val success = downloadModel(source.url, fileNameForSource)
             results[source.name] = success
         }
         return results

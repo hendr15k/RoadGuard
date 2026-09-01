@@ -127,7 +127,6 @@ class UpdateChecker @Inject constructor(
 
         return when {
             releaseBuildNumber > 0 && currentBuildNumber > 0 -> releaseBuildNumber > currentBuildNumber
-            releaseTag.startsWith("v") && currentVersion.startsWith("v") -> compareSemanticVersions(releaseTag, currentVersion) > 0
             releaseTag.startsWith("build-") && currentVersion.startsWith("v") -> true
             releaseTag.startsWith("v") && currentVersion.startsWith("build-") -> false
             else -> compareSemanticVersions(releaseTag, currentVersion) > 0
@@ -155,11 +154,18 @@ class UpdateChecker @Inject constructor(
     }
 
     private fun extractVersionNumbers(version: String): List<Int> {
-        val cleanVersion = version
-            .replace(Regex("[^0-9.]"), "")
-            .trim('.')
-        return cleanVersion.split(".")
-            .mapNotNull { it.toIntOrNull() }
+        // Nur zusammenhängende Ziffernblöcke je Segment nehmen. Ein globales
+        // Entfernen aller Nicht-Ziffern ("v1.0.46-46-g3bae404" → "1.0.46463")
+        // verfälschte den Vergleich durch konkatenierte Zahlen.
+        val segments = version.split('.', '-', '+', '_', ' ')
+        val numbers = mutableListOf<Int>()
+        for (segment in segments) {
+            val digits = segment.takeWhile { it.isDigit() }
+            if (digits.isNotEmpty()) {
+                numbers.add(digits.toIntOrNull() ?: 0)
+            }
+        }
+        return numbers
     }
 }
 

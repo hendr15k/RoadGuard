@@ -67,14 +67,6 @@ fun VideoPreview(
     // Disposal, NICHT bei videoUri-Wechsel. Resultat: alter ExoPlayer + alter
     // FrameProcessor-Job wurden nie freigegeben.
     DisposableEffect(exoPlayer) {
-        onDispose {
-            frameProcessorHolder.job?.cancel()
-            frameProcessorHolder.job = null
-            exoPlayer.release()
-        }
-    }
-
-    DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
@@ -95,7 +87,16 @@ fun VideoPreview(
         }
 
         onDispose {
-            exoPlayer.removeListener(listener)
+            try {
+                exoPlayer.removeListener(listener)
+            } catch (_: Exception) {
+            }
+            frameProcessorHolder.job?.cancel()
+            frameProcessorHolder.job = null
+            try {
+                exoPlayer.release()
+            } catch (_: Exception) {
+            }
         }
     }
 

@@ -13,8 +13,12 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 class LaneDetector(
-    private val sensitivity: Float = 0.5f
+    private var sensitivity: Float = 0.5f
 ) {
+
+    fun updateSensitivity(value: Float) {
+        sensitivity = value.coerceIn(0f, 1f)
+    }
     /** 4-tuple of floats — used for (a, b, c, points) when returning a fitted polynomial. */
     private data class Quad(
         val a: Float,
@@ -103,6 +107,8 @@ class LaneDetector(
     private val rightCoeffB = CoeffKalman(0f)
     private val rightCoeffC = CoeffKalman(0f)
     private var kalmanPrimed = false
+    private var leftPrimed = false
+    private var rightPrimed = false
 
     fun detectLanes(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): LaneDetectionResult {
         frameCounter++
@@ -346,6 +352,8 @@ class LaneDetector(
         leftCoeffA.reset(); leftCoeffB.reset(); leftCoeffC.reset()
         rightCoeffA.reset(); rightCoeffB.reset(); rightCoeffC.reset()
         kalmanPrimed = false
+        leftPrimed = false
+        rightPrimed = false
     }
 
     private fun computePerspectiveMatrix(w: Int, h: Int) {
@@ -391,26 +399,25 @@ class LaneDetector(
      * on noisy frames.
      */
     private fun detectVanishingPoint(w: Int, h: Int): Float {
+        val gray = lastBirdGray ?: return (h * 0.5f).coerceIn(h * 0.35f, h * 0.65f)
         val lo = (h * 0.35f).toInt()
         val hi = (h * 0.65f).toInt()
         val midX = w / 2
-        var bestRow = (h * 0.55f).toInt()
+        var bestRow = (h * 0.5f).toInt()
         var bestScore = Float.MIN_VALUE
 
         for (y in lo until hi step 3) {
-            // Symmetry score: sum of edge pixels in left half should equal right half
             var leftCount = 0
             var rightCount = 0
             for (x in 1 until w - 1) {
-                if (lastBirdGray == null) continue
                 val idx = y * w + x
-                if (idx >= lastBirdGray!!.size) continue
-                val edge = lastBirdGray!![idx]
-                if (x < midX) leftCount += edge else rightCount += edge
+                if (idx >= gray.size) continue
+                if (gray[idx] != 0) {
+                    if (x < midX) leftCount++ else rightCount++
+                }
             }
             val symmetry = 1f - abs(leftCount - rightCount).toFloat() /
                 max(leftCount + rightCount, 1)
-            // Edge density peaks near the horizon
             val density = (leftCount + rightCount).toFloat() / w
             val score = symmetry * density
 
@@ -850,13 +857,15 @@ class LaneDetector(
         val kfA = if (isLeft) leftCoeffA else rightCoeffA
         val kfB = if (isLeft) leftCoeffB else rightCoeffB
         val kfC = if (isLeft) leftCoeffC else rightCoeffC
+        val sidePrimed = if (isLeft) leftPrimed else rightPrimed
         val a: Float
         val bCoef: Float
         val cCoef: Float
-        if (!kalmanPrimed) {
+        if (!sidePrimed) {
             kfA.reset(aRaw); kfB.reset(bRaw); kfC.reset(cRaw)
             a = aRaw; bCoef = bRaw; cCoef = cRaw
-            kalmanPrimed = true
+            if (isLeft) leftPrimed = true else rightPrimed = true
+            if (leftPrimed && rightPrimed) kalmanPrimed = true
         } else {
             a = kfA.update(aRaw)
             bCoef = kfB.update(bRaw)
@@ -1185,6 +1194,8 @@ class LaneDetector(
                     angle = previous.angle,
                     length = previous.length,
                     curvature = previous.curvature,
+                    polyA = previous.polyA, polyB = previous.polyB, polyC = previous.polyC,
+                    yStart = previous.yStart, yEnd = previous.yEnd,
                     valid = false
                 )
             }
@@ -1215,7 +1226,9 @@ class LaneDetector(
             angle = current.angle,
             length = current.length,
             curvature = current.curvature,
-            valid = current.valid
+            valid = current.valid,
+            polyA = current.polyA, polyB = current.polyB, polyC = current.polyC,
+            yStart = current.yStart, yEnd = current.yEnd
         )
     }
 }

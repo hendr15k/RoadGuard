@@ -18,10 +18,19 @@ import kotlin.math.max
 import kotlin.math.min
 
 class MlDetectionAnalyzer(
-    private val vehicleThreshold: Float = 20f,
-    private val laneSensitivity: Float = 0.5f,
+    private var vehicleThreshold: Float = 20f,
+    private var laneSensitivity: Float = 0.5f,
     private val appContext: Context? = null
 ) : ImageAnalysis.Analyzer {
+
+    fun updateVehicleThreshold(value: Float) {
+        vehicleThreshold = value
+    }
+
+    fun updateLaneSensitivity(value: Float) {
+        laneSensitivity = value
+        laneDetector.updateSensitivity(value)
+    }
 
     private val objectDetector: ObjectDetector = ObjectDetection.getClient(
         ObjectDetectorOptions.Builder()
@@ -99,12 +108,29 @@ class MlDetectionAnalyzer(
             val uBuffer = mediaImage.planes[1].buffer
             val vBuffer = mediaImage.planes[2].buffer
 
-            // Buffer-Read für YUV-LaneDetector: Snapshot der Größe VOR dem Read
-            // weil `remaining()` während des Lesens abnimmt und die LaneDetector-
-            // Logik darauf angewiesen ist, dass der Buffer bei Eintritt voll ist.
-            val yData = ByteArray(yBuffer.remaining())
-            yBuffer.rewind()
-            yBuffer.get(yData)
+            // Stride-Safety: CameraX nutzt fast nie rowStride==width (Padding,
+            // z.B. 1280 bei 1080-Breite). Ohne Stride-Respekt werden Zeilen
+            // verschoben eingelesen → Lane-Erkennung zeigt auf realen Geräten
+            // komplett falsche Resultate.
+            val yPlane = mediaImage.planes[0]
+            val yRowStride = yPlane.rowStride
+            val yPixelStride = yPlane.pixelStride
+            val yBufferSize = yBuffer.remaining()
+            val yData = ByteArray(imageProxy.width * imageProxy.height)
+            if (yPixelStride == 1 && yRowStride == imageProxy.width) {
+                yBuffer.rewind()
+                yBuffer.get(yData)
+            } else {
+                for (row in 0 until imageProxy.height) {
+                    val srcStart = row * yRowStride
+                    val dstStart = row * imageProxy.width
+                    if (srcStart >= yBufferSize) break
+                    val copyLen = minOf(imageProxy.width, yBufferSize - srcStart)
+                    for (col in 0 until copyLen) {
+                        yData[dstStart + col] = yBuffer.get(srcStart + col * yPixelStride)
+                    }
+                }
+            }
 
             val swResult = laneDetector.detectLanesFromYUV(yData, imageProxy.width, imageProxy.height)
 

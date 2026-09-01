@@ -78,6 +78,7 @@ fun MainScreen(
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val activeWarning by viewModel.activeWarning.collectAsState()
+    val settings by viewModel.settings.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
@@ -93,9 +94,6 @@ fun MainScreen(
         if (!cameraPermissionState.status.isGranted) {
             cameraPermissionState.launchPermissionRequest()
         }
-        // Trigger initial update check explicitly (replaces the old
-        // UpdateViewModel.init { checkForUpdates() } which caused
-        // double-fires on config-change VM recreation).
         updateViewModel.checkForUpdates()
     }
 
@@ -105,15 +103,13 @@ fun MainScreen(
         }
     }
 
-    // === Video-Modus: eine Pipeline, die laneInfo UND vehicleDistance sammelt ===
-    // Frühere Implementierung hatte ZWEI separate LaunchedEffect(videoAnalyzer)-
-    // Blöcke mit dem gleichen Key. LaunchedEffect mit identischem Key
-    // collected SEQUENZIELL — d.h. der zweite Block wurde nie ausgeführt, weil
-    // der erste endlos läuft. vehicleDistance aus dem Video-Modus erreichte
-    // das ViewModel also nie.
+    LaunchedEffect(videoAnalyzer, settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity) {
+        videoAnalyzer?.updateVehicleThreshold(settings.minFollowingDistanceMeters)
+        videoAnalyzer?.updateLaneSensitivity(settings.laneDepartureSensitivity)
+    }
+
     LaunchedEffect(videoAnalyzer) {
         val analyzer = videoAnalyzer ?: return@LaunchedEffect
-        // merge: collect BEIDE Flows parallel mit coroutineScope.
         kotlinx.coroutines.coroutineScope {
             launch { analyzer.laneInfo.collect { info -> info?.let { viewModel.updateLaneInfo(it) } } }
             launch { analyzer.vehicleDistance.collect { d -> d?.let { viewModel.updateVehicleDistance(it) } } }
@@ -166,7 +162,8 @@ fun MainScreen(
                     modifier = Modifier.fillMaxSize(),
                     onLaneUpdate = viewModel::updateLaneInfo,
                     onDistanceUpdate = viewModel::updateVehicleDistance,
-                    appContext = appContext
+                    appContext = appContext,
+                    settings = settings
                 )
 
                 LaneOverlay(
@@ -242,7 +239,8 @@ fun CameraPreview(
     modifier: Modifier = Modifier,
     onLaneUpdate: (com.roadguard.app.domain.model.LaneInfo) -> Unit,
     onDistanceUpdate: (com.roadguard.app.domain.model.VehicleDistance) -> Unit,
-    appContext: Context? = null
+    appContext: Context? = null,
+    settings: com.roadguard.app.domain.model.AppSettings
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -252,6 +250,11 @@ fun CameraPreview(
     // der alte Analyzer geleaked.
     val mlAnalyzer = remember(appContext) {
         MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext)
+    }
+
+    LaunchedEffect(settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity) {
+        mlAnalyzer.updateVehicleThreshold(settings.minFollowingDistanceMeters)
+        mlAnalyzer.updateLaneSensitivity(settings.laneDepartureSensitivity)
     }
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
@@ -301,7 +304,11 @@ fun CameraPreview(
 
         onDispose {
             try {
-                cameraProviderFuture.get().unbindAll()
+                if (cameraProviderFuture.isDone) {
+                    cameraProviderFuture.get().unbindAll()
+                } else {
+                    cameraProviderFuture.cancel(true)
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }

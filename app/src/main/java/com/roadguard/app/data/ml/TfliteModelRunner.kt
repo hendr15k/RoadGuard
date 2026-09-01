@@ -28,11 +28,19 @@ class TfliteModelRunner(private val context: Context) {
                 }
             }
             val newInterpreter = Interpreter(modelBuffer)
+            val oldInterpreter = interpreter
             interpreter = newInterpreter
+            oldInterpreter?.close()
 
             val outputShape = newInterpreter.getOutputTensor(0).shape()
-            if (outputShape.size >= 4 && outputShape[1] > 0) {
-                numClasses = outputShape[1]
+            // NHWC-Layout [1,H,W,C]: Klassenzahl steht an letzter Stelle,
+            // nicht an Index 1 (dort steht die Höhe → numClasses=257 war
+            // falsch und erzeugte BufferOverflow im Output-Indexing).
+            if (outputShape.size >= 2) {
+                val classes = outputShape[outputShape.size - 1]
+                if (classes > 0) {
+                    numClasses = classes
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -43,7 +51,10 @@ class TfliteModelRunner(private val context: Context) {
         try {
             val modelFile = File(filePath)
             if (modelFile.exists()) {
-                interpreter = Interpreter(modelFile)
+                val newInterpreter = Interpreter(modelFile)
+                val oldInterpreter = interpreter
+                interpreter = newInterpreter
+                oldInterpreter?.close()
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -55,25 +66,26 @@ class TfliteModelRunner(private val context: Context) {
 
         val inputBuffer = preprocessBitmap(bitmap)
         val outputShape = interpreter.getOutputTensor(0).shape()
-        val outputSize = outputShape[2] * outputShape[3]
+        // [1, H, W, C] — H/W/C jeweils mit Fallback auf inputSize/numClasses
+        val outHeight = outputShape.getOrNull(1)?.takeIf { it > 0 } ?: inputSize
+        val outWidth = outputShape.getOrNull(2)?.takeIf { it > 0 } ?: inputSize
+        val classes = outputShape.getOrNull(3)?.takeIf { it > 0 } ?: numClasses
         val outputBuffer = ByteBuffer.allocateDirect(
-            outputShape[1] * outputSize * 4
+            outHeight * outWidth * classes * 4
         ).order(ByteOrder.nativeOrder())
 
         interpreter.run(inputBuffer, outputBuffer)
         outputBuffer.rewind()
 
-        val height = outputShape[2]
-        val width = outputShape[3]
-        val result = Array(height) { IntArray(width) }
+        val result = Array(outHeight) { IntArray(outWidth) }
 
         val floatBuffer = outputBuffer.asFloatBuffer()
-        for (y in 0 until height) {
-            for (x in 0 until width) {
+        for (y in 0 until outHeight) {
+            for (x in 0 until outWidth) {
                 var maxClass = 0
                 var maxScore = Float.MIN_VALUE
-                for (c in 0 until numClasses) {
-                    val score = floatBuffer.get(y * width * numClasses + x * numClasses + c)
+                for (c in 0 until classes) {
+                    val score = floatBuffer.get(((y * outWidth) + x) * classes + c)
                     if (score > maxScore) {
                         maxScore = score
                         maxClass = c
@@ -182,6 +194,7 @@ class TfliteModelRunner(private val context: Context) {
             // Pixel lesen. coerceAtLeast(1) verhindert das.
             val yRowStride = if (height > 0) (yPlane.remaining() / height).coerceAtLeast(1) else 1
             val uvRowStride = if (height > 1) (uPlane.remaining() / (height / 2)).coerceAtLeast(1) else 1
+            val uvPixelStride = if (uvRowStride > 0) (uPlane.remaining() / (height / 2) / 2).coerceAtLeast(1) else 1
             val yPlaneSize = yPlane.remaining()
             val uPlaneSize = uPlane.remaining()
             val vPlaneSize = vPlane.remaining()
@@ -196,8 +209,8 @@ class TfliteModelRunner(private val context: Context) {
                     val uvIndex = uvY * uvRowStride + uvX
 
                     val yVal = if (yIndex < yPlaneSize) yPlane.get(yIndex).toInt() and 0xFF else 0
-                    val uVal = if (uvIndex < uPlaneSize) uPlane.get(uvIndex).toInt() and 0xFF else 128
-                    val vVal = if (uvIndex < vPlaneSize) vPlane.get(uvIndex).toInt() and 0xFF else 128
+                    val uVal = if (uvIndex < uPlaneSize) uPlane.get(uvIndex * uvPixelStride).toInt() and 0xFF else 128
+                    val vVal = if (uvIndex < vPlaneSize) vPlane.get(uvIndex * uvPixelStride).toInt() and 0xFF else 128
 
                     val r = (yVal + 1.402 * (vVal - 128)).toInt().coerceIn(0, 255)
                     val g = (yVal - 0.344136 * (uVal - 128) - 0.714136 * (vVal - 128)).toInt().coerceIn(0, 255)

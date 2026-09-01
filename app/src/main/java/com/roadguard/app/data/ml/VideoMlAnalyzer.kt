@@ -14,10 +14,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class VideoMlAnalyzer(
-    private val vehicleThreshold: Float = 20f,
-    private val laneSensitivity: Float = 0.5f,
+    private var vehicleThreshold: Float = 20f,
+    private var laneSensitivity: Float = 0.5f,
     private val appContext: Context? = null
 ) {
+
+    fun updateVehicleThreshold(value: Float) {
+        vehicleThreshold = value
+    }
+
+    fun updateLaneSensitivity(value: Float) {
+        laneSensitivity = value
+        laneDetector.updateSensitivity(value)
+    }
     private val objectDetector: ObjectDetector = ObjectDetection.getClient(
         ObjectDetectorOptions.Builder()
             .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
@@ -146,11 +155,16 @@ class VideoMlAnalyzer(
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
                 processVehicleResult(detectedObjects, imageHeight)
-                bitmapToRecycle.recycle()
             }
-            .addOnFailureListener { e ->
-                // Detection failed for this frame - reset distance
+            .addOnFailureListener {
                 _vehicleDistance.value = null
+            }
+            .addOnCompleteListener {
+                try {
+                    if (!bitmapToRecycle.isRecycled) bitmapToRecycle.recycle()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
     }
 
