@@ -202,11 +202,11 @@ private fun startFrameProcessing(
                                 val argbBitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, false)
                                 scaledBitmap.recycle()
                                 if (argbBitmap != null) {
-                                    try {
-                                        videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.width, argbBitmap.height)
-                                    } finally {
-                                        argbBitmap.recycle()
-                                    }
+                                    // Ownership is transferred to VideoMlAnalyzer.
+                                    // ML Kit reads InputImage asynchronously, so recycling
+                                    // here is a use-after-recycle on many devices. The analyzer
+                                    // releases it in its onComplete listener (or on any early exit).
+                                    videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.height)
                                 }
                             }
                         } catch (e: Exception) {

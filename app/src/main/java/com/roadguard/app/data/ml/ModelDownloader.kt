@@ -36,6 +36,8 @@ class ModelDownloader(private val context: Context) {
 
     suspend fun downloadModel(modelUrl: String, fileName: String = CURRENT_MODEL_FILE): Boolean {
         return withContext(Dispatchers.IO) {
+            var success = false
+            var tempFileRef: File? = null
             val connection = try {
                 val url = URL(modelUrl)
                 url.openConnection() as HttpURLConnection
@@ -45,13 +47,20 @@ class ModelDownloader(private val context: Context) {
             }
 
             try {
+                // Prevent path traversal if a caller ever supplies a remote or
+                // user-controlled filename. Models are always confined to MODEL_DIR.
+                val safeFileName = File(fileName).name
+                if (safeFileName.isBlank() || safeFileName == "." || safeFileName == "..") {
+                    return@withContext false
+                }
                 val modelDir = File(context.filesDir, MODEL_DIR)
-                if (!modelDir.exists()) modelDir.mkdirs()
+                if (!modelDir.exists() && !modelDir.mkdirs()) return@withContext false
 
-                val modelFile = File(modelDir, fileName)
-                val tempFile = File(modelDir, "$fileName.tmp")
-
-                if (tempFile.exists()) tempFile.delete()
+                val modelFile = File(modelDir, safeFileName)
+                // Unique temp file so a retry or a concurrent download cannot
+                // delete/clobber another download's in-progress file.
+                val tempFile = File.createTempFile("$safeFileName.", ".tmp", modelDir)
+                tempFileRef = tempFile
 
                 connection.connectTimeout = 30000
                 connection.readTimeout = 30000
@@ -85,16 +94,37 @@ class ModelDownloader(private val context: Context) {
                     }
                 }
 
-                if (modelFile.exists()) modelFile.delete()
+                if (tempFile.length() <= 0L) return@withContext false
+
+                // Move the current model aside instead of deleting it, so a failed
+                // rename cannot leave the app with no model at all.
+                val backup = File(modelDir, "$safeFileName.bak")
+                if (modelFile.exists()) {
+                    backup.delete()
+                    if (!modelFile.renameTo(backup)) {
+                        android.util.Log.e("ModelDownloader", "Failed to move existing model aside")
+                        return@withContext false
+                    }
+                }
                 if (!tempFile.renameTo(modelFile)) {
                     android.util.Log.e("ModelDownloader", "Failed to rename temp file to model file")
+                    if (backup.exists()) backup.renameTo(modelFile)
                     return@withContext false
                 }
+                backup.delete()
+                success = true
                 true
             } catch (e: Exception) {
                 e.printStackTrace()
                 false
             } finally {
+                if (!success) {
+                    try {
+                        tempFileRef?.delete()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
                 connection.disconnect()
             }
         }

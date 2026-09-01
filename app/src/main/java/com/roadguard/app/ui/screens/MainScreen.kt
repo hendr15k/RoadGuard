@@ -35,6 +35,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import java.util.concurrent.Executors
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import com.roadguard.app.data.ml.MlDetectionAnalyzer
@@ -66,12 +67,17 @@ fun MainScreen(
     // VideoMlAnalyzer wird nur erzeugt wenn der User tatsächlich ein Video
     // auswählt. Frühere Implementierung erzeugte ihn immer (und damit
     // ObjectDetector + TFLite Interpreter + Speicher), auch im Live-Modus.
-    val videoAnalyzer = remember(showVideoPicker) {
-        if (showVideoPicker) VideoMlAnalyzer(appContext = appContext) else null
+    val videoAnalyzer = remember(videoUri) {
+        if (videoUri != null) VideoMlAnalyzer(appContext = appContext) else null
     }
     DisposableEffect(videoAnalyzer) {
         onDispose {
-            videoAnalyzer?.close()
+            val analyzer = videoAnalyzer ?: return@onDispose
+            // Closing can block behind an in-flight frame; keep it off the main
+            // thread. The analyzer serializes close() with its detector.
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                analyzer.close()
+            }
         }
     }
 
@@ -129,7 +135,8 @@ fun MainScreen(
 
                     LaneOverlay(
                         laneInfo = laneInfo,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        fillCenter = false
                     )
 
                     WarningOverlay(
@@ -147,7 +154,11 @@ fun MainScreen(
                     )
 
                     FloatingActionButton(
-                        onClick = { showVideoPicker = false },
+                        onClick = {
+                            videoUri = null
+                            showVideoPicker = false
+                            viewModel.clearDetectionState()
+                        },
                         modifier = Modifier
                             .align(Alignment.BottomStart)
                             .padding(16.dp),
@@ -273,9 +284,14 @@ fun CameraPreview(
     }
 
     DisposableEffect(lifecycleOwner, mlAnalyzer) {
-        // addListener ist non-blocking (callback auf Main-Executor).
-        // Vorher wurde cameraProviderFuture.get() direkt aufgerufen — das
-        // ist blockierend und kann auf langsamen Devices ANR verursachen.
+        // Lane + TFLite inference is CPU-heavy and must never run on Main.
+        // The worker belongs to this binding lifecycle; a rebind therefore never
+        // receives a previously shut-down executor.
+        val analysisExecutor = Executors.newSingleThreadExecutor { runnable ->
+            // Daemon threads: a stuck frame must never keep the process alive.
+            Thread(runnable, "roadguard-analysis").apply { isDaemon = true }
+        }
+        var boundAnalysis: ImageAnalysis? = null
         val mainExecutor = ContextCompat.getMainExecutor(context)
         val listener = Runnable {
             try {
@@ -287,7 +303,10 @@ fun CameraPreview(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                     .build()
-                    .also { it.setAnalyzer(mainExecutor, mlAnalyzer) }
+                    .also {
+                        it.setAnalyzer(analysisExecutor, mlAnalyzer)
+                        boundAnalysis = it
+                    }
 
                 cameraProviderInstance.unbindAll()
                 cameraProviderInstance.bindToLifecycle(
@@ -305,6 +324,7 @@ fun CameraPreview(
         onDispose {
             try {
                 if (cameraProviderFuture.isDone) {
+                    boundAnalysis?.clearAnalyzer()
                     cameraProviderFuture.get().unbindAll()
                 } else {
                     cameraProviderFuture.cancel(true)
@@ -312,7 +332,19 @@ fun CameraPreview(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            mlAnalyzer.close()
+            // The analyzer now runs on the worker, so dispose it there. Queuing
+            // close() before shutdown() serializes it against in-flight frames —
+            // closing from Main while a frame is processed crashes the interpreter.
+            analysisExecutor.execute {
+                try {
+                    mlAnalyzer.close()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            // Orderly shutdown only — the queued close() still runs, and blocking
+            // here would stall the main thread for up to a full frame.
+            analysisExecutor.shutdown()
         }
     }
 
@@ -446,10 +478,18 @@ fun StatusBar(
         // Lane Status
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("LANE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-            val isLaneOk = laneInfo?.isDriftingLeft == false && laneInfo?.isDriftingRight == false
+            // No lane info yet is not a warning — it only means "not evaluated".
+            val isLaneOk = laneInfo == null ||
+                (!laneInfo.isDriftingLeft && !laneInfo.isDriftingRight)
+            val laneText = if (laneInfo == null) "--" else if (isLaneOk) "OK" else "WARN"
+            val laneColor = when {
+                laneInfo == null -> Color.Gray
+                isLaneOk -> SafeGreen
+                else -> WarningYellow
+            }
             Text(
-                if (isLaneOk) "OK" else "WARN",
-                color = if (isLaneOk) SafeGreen else WarningYellow,
+                laneText,
+                color = laneColor,
                 style = MaterialTheme.typography.titleSmall
             )
         }

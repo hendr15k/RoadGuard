@@ -49,11 +49,21 @@ class MainViewModel @Inject constructor(
     fun updateSettings(settings: AppSettings) {
         viewModelScope.launch {
             updateSettingsUseCase(settings)
+            // Re-evaluate against the settings that were just persisted. Reading
+            // the flow back is not guaranteed to be updated yet, so pass them in.
+            checkForWarnings(settings)
         }
     }
 
-    private fun checkForWarnings() {
-        val currentSettings = settings.value
+    fun clearDetectionState() {
+        viewModelScope.launch {
+            _laneInfo.value = null
+            _vehicleDistance.value = null
+            _activeWarning.value = null
+        }
+    }
+
+    private fun checkForWarnings(currentSettings: AppSettings = settings.value) {
         var warning: WarningType? = null
 
         _laneInfo.value?.let { lane ->

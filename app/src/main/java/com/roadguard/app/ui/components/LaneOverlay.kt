@@ -4,7 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -19,20 +18,30 @@ import com.roadguard.app.ui.theme.WarningYellow
 import kotlin.math.max
 import kotlin.math.min
 
-private const val REFERENCE_W = 800f
-private const val REFERENCE_H = 600f
+private data class CanvasTransform(
+    val scale: Float,
+    val offsetX: Float,
+    val offsetY: Float
+)
 
+/**
+ * @param fillCenter matches how the surface underneath scales the source frame:
+ *   - `true`  → PreviewView FILL_CENTER (camera): uniform scale + centre crop.
+ *   - `false` → PlayerView default RESIZE_MODE_FIT (video): uniform scale +
+ *     letterbox, so the overlay must use fit semantics or it is drawn offset.
+ */
 @Composable
 fun LaneOverlay(
     laneInfo: LaneInfo?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    fillCenter: Boolean = true
 ) {
     Canvas(modifier = modifier) {
-        laneInfo?.let { drawLaneOverlay(it) }
+        laneInfo?.let { drawLaneOverlay(it, fillCenter) }
     }
 }
 
-private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
+private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean) {
     val canvasW = size.width
     val canvasH = size.height
     if (canvasW <= 0f || canvasH <= 0f) return
@@ -42,7 +51,7 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
     val hasLeft = leftCurve.valid && laneInfo.leftLaneVisible
     val hasRight = rightCurve.valid && laneInfo.rightLaneVisible
 
-    val (scaleX, scaleY) = computeCanvasScale(laneInfo, canvasW, canvasH)
+    val transform = computeCanvasTransform(laneInfo, canvasW, canvasH, fillCenter)
 
     val isDrifting = laneInfo.isDriftingLeft || laneInfo.isDriftingRight
     val baseColor = when {
@@ -58,10 +67,7 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
         drawLaneArea(
             leftCurve = leftCurve,
             rightCurve = rightCurve,
-            scaleX = scaleX,
-            scaleY = scaleY,
-            canvasW = canvasW,
-            canvasH = canvasH,
+            transform = transform,
             color = baseColor
         )
     }
@@ -69,10 +75,7 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
     if (hasLeft) {
         drawLaneLine(
             curve = leftCurve,
-            scaleX = scaleX,
-            scaleY = scaleY,
-            canvasW = canvasW,
-            canvasH = canvasH,
+            transform = transform,
             color = baseColor,
             isDrifting = laneInfo.isDriftingLeft
         )
@@ -81,10 +84,7 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
     if (hasRight) {
         drawLaneLine(
             curve = rightCurve,
-            scaleX = scaleX,
-            scaleY = scaleY,
-            canvasW = canvasW,
-            canvasH = canvasH,
+            transform = transform,
             color = baseColor,
             isDrifting = laneInfo.isDriftingRight
         )
@@ -96,8 +96,7 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
             rightCurve = rightCurve,
             hasLeft = hasLeft,
             hasRight = hasRight,
-            scaleX = scaleX,
-            scaleY = scaleY,
+            transform = transform,
             canvasW = canvasW,
             canvasH = canvasH,
             color = baseColor
@@ -109,18 +108,35 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo) {
     }
 }
 
-private fun computeCanvasScale(laneInfo: LaneInfo, canvasW: Float, canvasH: Float): Pair<Float, Float> {
-    val refW = if (laneInfo.imageWidth > 0) laneInfo.imageWidth.toFloat() else REFERENCE_W
-    val refH = if (laneInfo.imageHeight > 0) laneInfo.imageHeight.toFloat() else REFERENCE_H
-    val scaleX = canvasW / refW
-    val scaleY = canvasH / refH
-    return Pair(scaleX, scaleY)
+private fun computeCanvasTransform(
+    laneInfo: LaneInfo,
+    canvasW: Float,
+    canvasH: Float,
+    fillCenter: Boolean
+): CanvasTransform {
+    if (laneInfo.imageWidth <= 0 || laneInfo.imageHeight <= 0) {
+        return CanvasTransform(1f, 0f, 0f)
+    }
+    val refW = laneInfo.imageWidth.toFloat()
+    val refH = laneInfo.imageHeight.toFloat()
+    // Uniform scale either way: independent scaleX/scaleY distorted the curves
+    // whenever canvas and source aspect ratios differed. Fill crops the source,
+    // fit letterboxes it inside the canvas.
+    val scale = if (fillCenter) {
+        max(canvasW / refW, canvasH / refH)
+    } else {
+        min(canvasW / refW, canvasH / refH)
+    }
+    return CanvasTransform(
+        scale = scale,
+        offsetX = (canvasW - refW * scale) / 2f,
+        offsetY = (canvasH - refH * scale) / 2f
+    )
 }
 
 private fun curveToCanvasPath(
     curve: LaneCurve,
-    scaleX: Float,
-    scaleY: Float
+    transform: CanvasTransform
 ): Path {
     val path = Path()
     val yStart = curve.yStart
@@ -133,8 +149,8 @@ private fun curveToCanvasPath(
     var first = true
     while (y <= yEnd) {
         val xSrc = curve.a * y * y + curve.b * y + curve.c
-        val px = xSrc * scaleX
-        val py = y * scaleY
+        val px = xSrc * transform.scale + transform.offsetX
+        val py = y * transform.scale + transform.offsetY
         if (first) {
             path.moveTo(px, py)
             first = false
@@ -148,14 +164,11 @@ private fun curveToCanvasPath(
 
 private fun DrawScope.drawLaneLine(
     curve: LaneCurve,
-    scaleX: Float,
-    scaleY: Float,
-    canvasW: Float,
-    canvasH: Float,
+    transform: CanvasTransform,
     color: Color,
     isDrifting: Boolean
 ) {
-    val path = curveToCanvasPath(curve, scaleX, scaleY)
+    val path = curveToCanvasPath(curve, transform)
     val mainStroke = Stroke(width = 10f, cap = StrokeCap.Round)
     drawPath(path = path, color = color.copy(alpha = 0.95f), style = mainStroke)
 
@@ -167,17 +180,14 @@ private fun DrawScope.drawLaneLine(
         )
     }
 
-    val glowPath = curveToCanvasPath(curve, scaleX, scaleY)
+    val glowPath = curveToCanvasPath(curve, transform)
     drawPath(path = glowPath, color = color.copy(alpha = 0.25f), style = Stroke(width = 18f, cap = StrokeCap.Round))
 }
 
 private fun DrawScope.drawLaneArea(
     leftCurve: LaneCurve,
     rightCurve: LaneCurve,
-    scaleX: Float,
-    scaleY: Float,
-    canvasW: Float,
-    canvasH: Float,
+    transform: CanvasTransform,
     color: Color
 ) {
     val yStart = max(leftCurve.yStart, rightCurve.yStart)
@@ -192,8 +202,8 @@ private fun DrawScope.drawLaneArea(
     var first = true
     while (y <= yEnd) {
         val xSrc = leftCurve.a * y * y + leftCurve.b * y + leftCurve.c
-        val px = xSrc * scaleX
-        val py = y * scaleY
+        val px = xSrc * transform.scale + transform.offsetX
+        val py = y * transform.scale + transform.offsetY
         if (first) {
             path.moveTo(px, py)
             first = false
@@ -206,8 +216,8 @@ private fun DrawScope.drawLaneArea(
     y = yEnd
     while (y >= yStart) {
         val xSrc = rightCurve.a * y * y + rightCurve.b * y + rightCurve.c
-        val px = xSrc * scaleX
-        val py = y * scaleY
+        val px = xSrc * transform.scale + transform.offsetX
+        val py = y * transform.scale + transform.offsetY
         path.lineTo(px, py)
         y -= dy
     }
@@ -218,8 +228,8 @@ private fun DrawScope.drawLaneArea(
             color.copy(alpha = 0.32f),
             color.copy(alpha = 0.08f)
         ),
-        startY = yStart * scaleY,
-        endY = yEnd * scaleY
+        startY = yStart * transform.scale + transform.offsetY,
+        endY = yEnd * transform.scale + transform.offsetY
     )
     drawPath(path = path, brush = brush)
 }
@@ -229,8 +239,7 @@ private fun DrawScope.drawEgoVehicle(
     rightCurve: LaneCurve,
     hasLeft: Boolean,
     hasRight: Boolean,
-    scaleX: Float,
-    scaleY: Float,
+    transform: CanvasTransform,
     canvasW: Float,
     canvasH: Float,
     color: Color
@@ -265,8 +274,8 @@ private fun DrawScope.drawEgoVehicle(
             val lx = leftCurve.a * y * y + leftCurve.b * y + leftCurve.c
             val rx = rightCurve.a * y * y + rightCurve.b * y + rightCurve.c
             val mx = (lx + rx) / 2f
-            val px = mx * scaleX
-            val py = y * scaleY
+            val px = mx * transform.scale + transform.offsetX
+            val py = y * transform.scale + transform.offsetY
             if (first) {
                 centerPath.moveTo(px, py)
                 first = false
