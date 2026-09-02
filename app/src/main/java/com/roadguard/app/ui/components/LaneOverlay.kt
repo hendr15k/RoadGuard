@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import com.roadguard.app.domain.model.LaneCurve
 import com.roadguard.app.domain.model.LaneInfo
@@ -45,9 +46,18 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean) {
     val canvasW = size.width
     val canvasH = size.height
     if (canvasW <= 0f || canvasH <= 0f) return
-
-    val leftCurve = laneInfo.leftCurve
-    val rightCurve = laneInfo.rightCurve
+    // Do not draw into the letterbox bars of PlayerView FIT. Clipping here
+    // fixes the "lane trails into black UI" artifact that the 6-clip
+    // real-road retest proved. Without clip, yStart/yEnd extending beyond
+    // the video rect drew far below the frame.
+    val transformEarly = computeCanvasTransform(laneInfo, canvasW, canvasH, fillCenter)
+    val videoLeft = transformEarly.offsetX
+    val videoTop = transformEarly.offsetY
+    val videoRight = videoLeft + laneInfo.imageWidth.toFloat() * transformEarly.scale
+    val videoBottom = videoTop + laneInfo.imageHeight.toFloat() * transformEarly.scale
+    clipRect(left = videoLeft, top = videoTop, right = videoRight, bottom = videoBottom) {
+        val leftCurve = laneInfo.leftCurve
+        val rightCurve = laneInfo.rightCurve
     val hasLeft = leftCurve.valid && laneInfo.leftLaneVisible
     val hasRight = rightCurve.valid && laneInfo.rightLaneVisible
 
@@ -103,8 +113,9 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean) {
         )
     }
 
-    if (laneInfo.confidence < 0.4f && (hasLeft || hasRight)) {
-        drawUncertaintyIndicator(canvasW, canvasH, baseColor)
+        if (laneInfo.confidence < 0.4f && (hasLeft || hasRight)) {
+            drawUncertaintyIndicator(canvasW, canvasH, baseColor)
+        }
     }
 }
 

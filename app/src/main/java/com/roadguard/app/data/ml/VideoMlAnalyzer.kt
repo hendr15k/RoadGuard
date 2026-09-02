@@ -211,39 +211,26 @@ class VideoMlAnalyzer(
             }
     }
 
+    private val vehiclePipeline = VehiclePipeline()
+
     private fun processVehicleResult(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
         imageHeight: Int
     ) {
-        val vehicleCategories = setOf(
-            "Vehicle", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"
-        )
-
+        // Delegates label- vs geometry-fallback to the JVM-tested VehiclePipeline.
+        // The base ML Kit model never emits Vehicle/Car labels (only
+        // fashion/food/home/plants/places), so geometry fallback is required.
+        val detections = detectedObjects.map { obj ->
+            VehiclePipeline.Detection(
+                VehicleBox(obj.boundingBox.left, obj.boundingBox.top, obj.boundingBox.right, obj.boundingBox.bottom),
+                obj.labels.map { VehiclePipeline.Label(it.text, it.confidence) }
+            )
+        }
+        val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight)
         var closestVehicle: DetectedVehicle? = null
-        var minDistance = Float.MAX_VALUE
-
-        for (obj in detectedObjects) {
-            if (obj.labels.any { label ->
-                    vehicleCategories.any { cat ->
-                        label.text.contains(cat, ignoreCase = true)
-                    } && label.confidence > 0.4f
-                }
-            ) {
-                val boundingBox = obj.boundingBox
-                val distance = estimateDistance(
-                    boundingBox = boundingBox,
-                    imageHeight = imageHeight
-                )
-                
-                if (distance < minDistance) {
-                    minDistance = distance
-                    closestVehicle = DetectedVehicle(
-                        boundingBox = boundingBox,
-                        distance = distance,
-                        label = obj.labels.firstOrNull()?.text ?: "Vehicle"
-                    )
-                }
-            }
+        if (candidate != null) {
+            val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight)
+            closestVehicle = DetectedVehicle(candidate.boundingBox.toRect(), distance, candidate.label)
         }
 
         if (closestVehicle != null) {

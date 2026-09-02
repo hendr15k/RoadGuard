@@ -290,39 +290,26 @@ class MlDetectionAnalyzer(
             }
     }
 
+    private val vehiclePipeline = VehiclePipeline()
+
     private fun processVehicleResult(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
         imageHeight: Int
     ) {
-        val vehicleCategories = setOf(
-            "Vehicle", "Car", "Truck", "Bus", "Motorcycle", "Bicycle"
-        )
-
+        // Delegates label- vs geometry-fallback to the JVM-tested VehiclePipeline.
+        // The base ML Kit model never emits Vehicle/Car labels (only
+        // fashion/food/home/plants/places), so geometry fallback is required.
+        val detections = detectedObjects.map { obj ->
+            VehiclePipeline.Detection(
+                VehicleBox(obj.boundingBox.left, obj.boundingBox.top, obj.boundingBox.right, obj.boundingBox.bottom),
+                obj.labels.map { VehiclePipeline.Label(it.text, it.confidence) }
+            )
+        }
+        val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight)
         var closestVehicle: DetectedVehicle? = null
-        var minDistance = Float.MAX_VALUE
-
-        for (obj in detectedObjects) {
-            if (obj.labels.any { label ->
-                    vehicleCategories.any { cat ->
-                        label.text.contains(cat, ignoreCase = true)
-                    } && label.confidence > 0.4f
-                }
-            ) {
-                val boundingBox = obj.boundingBox
-                val distance = estimateDistance(
-                    boundingBox = boundingBox,
-                    imageHeight = imageHeight
-                )
-                
-                if (distance < minDistance) {
-                    minDistance = distance
-                    closestVehicle = DetectedVehicle(
-                        boundingBox = boundingBox,
-                        distance = distance,
-                        label = obj.labels.firstOrNull()?.text ?: "Vehicle"
-                    )
-                }
-            }
+        if (candidate != null) {
+            val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight)
+            closestVehicle = DetectedVehicle(candidate.boundingBox.toRect(), distance, candidate.label)
         }
 
         if (closestVehicle != null) {
@@ -406,40 +393,8 @@ class MlDetectionAnalyzer(
         return dx < tolerance && dy < tolerance
     }
 
-    private fun estimateDistance(boundingBox: Rect, imageHeight: Int): Float {
-        // Use bounding box height for distance estimation (more reliable than area)
-        val boxHeight = boundingBox.height().toFloat()
-        val boxBottom = boundingBox.bottom.toFloat()
-        
-        if (boxHeight <= 0) return 100f
-        
-        // Method 1: Using known object height and camera focal length
-        // distance = (focalLength * realHeight * imageHeight) / (boxHeight * sensorHeight)
-        // Simplified: distance = focalLength * realHeight / boxHeight
-        val distanceByHeight = (focalLengthPixels * vehicleHeightMeters) / boxHeight
-        
-        // Method 2: Using position in image (lower in image = closer)
-        // Assumes horizon is at 40% of image height
-        val horizonY = imageHeight * 0.4f
-        val groundY = imageHeight.toFloat()
-        val normalizedBottom = (boxBottom - horizonY) / (groundY - horizonY)
-        
-        // If object is above horizon, it's very far
-        if (normalizedBottom < 0.1f) return 100f
-        
-        // Distance based on position (empirical formula)
-        val distanceByPosition = 5f / maxOf(normalizedBottom, 0.05f)
-        
-        // Combine both methods with weighting
-        val combinedDistance = if (distanceByHeight > 0 && distanceByHeight < 200f) {
-            distanceByHeight * 0.6f + distanceByPosition * 0.4f
-        } else {
-            distanceByPosition
-        }
-        
-        // Adjust based on object type (trucks are taller)
-        return combinedDistance.coerceIn(3f, 150f)
-    }
+    private fun estimateDistance(boundingBox: Rect, imageHeight: Int): Float =
+        vehiclePipeline.estimateDistance(VehicleBox(boundingBox.left, boundingBox.top, boundingBox.right, boundingBox.bottom), imageHeight)
 
     private fun calculateTimeToCollision(currentDistance: Float, currentTime: Long): Float {
         val prevDist = prevDistance

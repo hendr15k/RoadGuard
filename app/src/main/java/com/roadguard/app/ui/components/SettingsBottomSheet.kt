@@ -88,6 +88,47 @@ fun SettingsBottomSheet(
                 steps = 7
             )
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Collision Alert Cooldown")
+                // Placeholder replaced below by the slider — row kept for layout parity
+            }
+            var repeatValue by remember { mutableStateOf(settings.alertRepeatSeconds) }
+            LaunchedEffect(settings.alertRepeatSeconds) {
+                repeatValue = settings.alertRepeatSeconds
+            }
+            Text(
+                String.format(
+                    java.util.Locale.US,
+                    "Alert repeat: %.1f s",
+                    repeatValue
+                )
+            )
+            Slider(
+                value = repeatValue,
+                onValueChange = { repeatValue = it },
+                onValueChangeFinished = {
+                    onSettingsUpdate(settings.copy(alertRepeatSeconds = repeatValue))
+                },
+                valueRange = 0.5f..5f,
+                steps = 8
+            )
+            Text(
+                "Shorter = more frequent reminders. Collision always repeats at 1.0 s and escalates after 3 repeats.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Button(
+                onClick = { onSettingsUpdate(settings.copy(alertRepeatSeconds = 3f)) },
+                enabled = settings.alertRepeatSeconds != 3f,
+                modifier = Modifier.align(Alignment.End)
+            ) { Text("Reset repeat to default") }
+
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
