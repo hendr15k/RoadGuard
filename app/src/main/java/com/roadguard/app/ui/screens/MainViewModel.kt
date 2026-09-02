@@ -2,6 +2,9 @@ package com.roadguard.app.ui.screens
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.roadguard.app.domain.model.AlertPolicy
+import com.roadguard.app.domain.model.AlertSignal
+import com.roadguard.app.domain.model.AlertState
 import com.roadguard.app.domain.model.AppSettings
 import com.roadguard.app.domain.model.LaneInfo
 import com.roadguard.app.domain.model.VehicleDistance
@@ -29,20 +32,29 @@ class MainViewModel @Inject constructor(
     private val _vehicleDistance = MutableStateFlow<VehicleDistance?>(null)
     val vehicleDistance: StateFlow<VehicleDistance?> = _vehicleDistance.asStateFlow()
 
+    private val policy = AlertPolicy()
+    private val _alertState = MutableStateFlow<AlertState>(AlertState.Idle)
+    val alertState: StateFlow<AlertState> = _alertState.asStateFlow()
+
+    /** One-shot vibration/sound event emitted exactly when the gate fires. */
+    private val _alertSignal = MutableStateFlow<AlertSignal?>(null)
+    val alertSignal: StateFlow<AlertSignal?> = _alertSignal.asStateFlow()
+
+    /** Kept for the Composables' StatusBar/WarningOverlay — derived from alertState. */
     private val _activeWarning = MutableStateFlow<WarningType?>(null)
     val activeWarning: StateFlow<WarningType?> = _activeWarning.asStateFlow()
 
     fun updateLaneInfo(laneInfo: LaneInfo) {
         viewModelScope.launch {
             _laneInfo.value = laneInfo
-            checkForWarnings()
+            reevaluate(nowMs = System.currentTimeMillis(), currentSettings = settings.value)
         }
     }
 
     fun updateVehicleDistance(distance: VehicleDistance) {
         viewModelScope.launch {
             _vehicleDistance.value = distance
-            checkForWarnings()
+            reevaluate(nowMs = System.currentTimeMillis(), currentSettings = settings.value)
         }
     }
 
@@ -50,8 +62,8 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             updateSettingsUseCase(settings)
             // Re-evaluate against the settings that were just persisted. Reading
-            // the flow back is not guaranteed to be updated yet, so pass them in.
-            checkForWarnings(settings)
+            // the flow back is not guaranteed to have emitted yet, so pass them in.
+            reevaluate(nowMs = System.currentTimeMillis(), currentSettings = settings)
         }
     }
 
@@ -59,28 +71,26 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             _laneInfo.value = null
             _vehicleDistance.value = null
+            policy.reset()
+            _alertState.value = AlertState.Idle
             _activeWarning.value = null
+            // Do not clear _alertSignal here — it is consumed by the UI.
         }
     }
 
-    private fun checkForWarnings(currentSettings: AppSettings = settings.value) {
-        var warning: WarningType? = null
+    private fun reevaluate(currentSettings: AppSettings, nowMs: Long) {
+        val evaluation = policy.evaluate(
+            settings = currentSettings,
+            laneInfo = _laneInfo.value,
+            distance = _vehicleDistance.value,
+            nowMs = nowMs
+        )
+        _alertState.value = evaluation.state
+        _activeWarning.value = (evaluation.state as? AlertState.Warning)?.type
+        if (evaluation.signal != null) _alertSignal.value = evaluation.signal
+    }
 
-        _laneInfo.value?.let { lane ->
-            if (currentSettings.laneWarningEnabled) {
-                when {
-                    lane.isDriftingLeft -> warning = WarningType.LaneDepartureLeft
-                    lane.isDriftingRight -> warning = WarningType.LaneDepartureRight
-                }
-            }
-        }
-
-        _vehicleDistance.value?.let { dist ->
-            if (currentSettings.collisionWarningEnabled && dist.isTooClose) {
-                warning = WarningType.ForwardCollision
-            }
-        }
-
-        _activeWarning.value = warning
+    fun consumeAlertSignal() {
+        _alertSignal.value = null
     }
 }

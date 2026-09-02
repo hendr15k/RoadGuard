@@ -4,5 +4,7 @@ data class AppSettings(
     val laneWarningEnabled: Boolean = true,
     val collisionWarningEnabled: Boolean = true,
     val minFollowingDistanceMeters: Float = 20f,
-    val laneDepartureSensitivity: Float = 0.5f
+    val laneDepartureSensitivity: Float = 0.5f,
+    /** Minimum seconds between repeated alarms for the same ongoing hazard. */
+    val alertRepeatSeconds: Float = 3f
 )

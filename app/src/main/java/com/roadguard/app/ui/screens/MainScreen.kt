@@ -40,6 +40,9 @@ import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import com.roadguard.app.data.ml.MlDetectionAnalyzer
 import com.roadguard.app.data.ml.VideoMlAnalyzer
+import com.roadguard.app.domain.model.AlertPhase
+import com.roadguard.app.domain.model.AlertSignal
+import com.roadguard.app.domain.model.AlertState
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.ui.components.LaneOverlay
 import com.roadguard.app.ui.components.SettingsBottomSheet
@@ -83,7 +86,8 @@ fun MainScreen(
 
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
-    val activeWarning by viewModel.activeWarning.collectAsState()
+    val alertState by viewModel.alertState.collectAsState()
+    val alertSignal by viewModel.alertSignal.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
 
@@ -103,10 +107,13 @@ fun MainScreen(
         updateViewModel.checkForUpdates()
     }
 
-    LaunchedEffect(activeWarning) {
-        activeWarning?.let { warning ->
-            playWarning(context, warning)
-        }
+    // Haptik/Audio nur noch auf dem entprellten Signal — nicht mehr pro Frame.
+    // consumeAlertSignal() verhindert, dass dieselbe Emission beim nächsten
+    // Recompose erneut vibriert.
+    LaunchedEffect(alertSignal) {
+        val signal = alertSignal ?: return@LaunchedEffect
+        playAlert(context, signal)
+        viewModel.consumeAlertSignal()
     }
 
     LaunchedEffect(videoAnalyzer, settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity) {
@@ -140,7 +147,7 @@ fun MainScreen(
                     )
 
                     WarningOverlay(
-                        laneInfo = laneInfo,
+                        alertState = alertState,
                         vehicleDistance = vehicleDistance,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -148,6 +155,7 @@ fun MainScreen(
                     StatusBar(
                         laneInfo = laneInfo,
                         vehicleDistance = vehicleDistance,
+                        alertState = alertState,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .padding(top = 48.dp)
@@ -183,7 +191,7 @@ fun MainScreen(
                 )
 
                 WarningOverlay(
-                    laneInfo = laneInfo,
+                    alertState = alertState,
                     vehicleDistance = vehicleDistance,
                     modifier = Modifier.fillMaxSize()
                 )
@@ -191,6 +199,7 @@ fun MainScreen(
                 StatusBar(
                     laneInfo = laneInfo,
                     vehicleDistance = vehicleDistance,
+                    alertState = alertState,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 48.dp)
@@ -356,34 +365,35 @@ fun CameraPreview(
 
 @Composable
 fun WarningOverlay(
-    laneInfo: com.roadguard.app.domain.model.LaneInfo?,
+    alertState: AlertState,
     vehicleDistance: com.roadguard.app.domain.model.VehicleDistance?,
     modifier: Modifier = Modifier
 ) {
+    // Nur bestätigte (ACTIVE) Alerts werden visuell gezeigt — ein einzelner
+    // CONFIRMING-Frame darf nicht blinken. So bleibt die Anzeige ruhig bis
+    // das Gate wirklich feuert.
+    val warning = (alertState as? AlertState.Warning)?.takeIf { it.phase == AlertPhase.ACTIVE }
     Box(modifier = modifier) {
-        laneInfo?.let { lane ->
-            if (lane.isDriftingLeft) {
-                LaneWarningIndicator(
-                    isLeft = true,
-                    modifier = Modifier.align(Alignment.CenterStart)
-                )
-            }
-            if (lane.isDriftingRight) {
-                LaneWarningIndicator(
-                    isLeft = false,
-                    modifier = Modifier.align(Alignment.CenterEnd)
-                )
+        when (warning?.type) {
+            is WarningType.LaneDepartureLeft -> LaneWarningIndicator(
+                isLeft = true,
+                modifier = Modifier.align(Alignment.CenterStart)
+            )
+            is WarningType.LaneDepartureRight -> LaneWarningIndicator(
+                isLeft = false,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
+            else -> {
+                // Kein aktiver Lane-Alert — nichts zeigen (verhindert Stale-Blinken)
             }
         }
-
-        vehicleDistance?.let { dist ->
-            if (dist.isTooClose) {
-                ForwardCollisionWarning(
-                    distance = dist.distanceMeters,
-                    ttc = dist.timeToCollision,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
+        if (warning?.type is WarningType.ForwardCollision) {
+            val dist = vehicleDistance ?: return@Box
+            ForwardCollisionWarning(
+                distance = dist.distanceMeters,
+                ttc = dist.timeToCollision,
+                modifier = Modifier.align(Alignment.Center)
+            )
         }
     }
 }
@@ -463,8 +473,10 @@ fun ForwardCollisionWarning(
 fun StatusBar(
     laneInfo: com.roadguard.app.domain.model.LaneInfo?,
     vehicleDistance: com.roadguard.app.domain.model.VehicleDistance?,
+    alertState: AlertState,
     modifier: Modifier = Modifier
 ) {
+    val activeType = (alertState as? AlertState.Warning)?.takeIf { it.phase == AlertPhase.ACTIVE }?.type
     Row(
         modifier = modifier
             .background(
@@ -475,17 +487,16 @@ fun StatusBar(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Lane Status
+        // Lane Status — warnt nur wenn das Gate ACTIVE ist, nicht bei jedem raw drift
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("LANE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-            // No lane info yet is not a warning — it only means "not evaluated".
-            val isLaneOk = laneInfo == null ||
-                (!laneInfo.isDriftingLeft && !laneInfo.isDriftingRight)
-            val laneText = if (laneInfo == null) "--" else if (isLaneOk) "OK" else "WARN"
-            val laneColor = when {
-                laneInfo == null -> Color.Gray
-                isLaneOk -> SafeGreen
-                else -> WarningYellow
+            val laneText = when (activeType) {
+                is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight -> "WARN"
+                else -> if (laneInfo == null) "--" else "OK"
+            }
+            val laneColor = when (activeType) {
+                is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight -> WarningYellow
+                else -> if (laneInfo == null) Color.Gray else SafeGreen
             }
             Text(
                 laneText,
@@ -528,6 +539,7 @@ fun StatusBar(
             Text(
                 vehicleDistance?.distanceMeters?.let { String.format(java.util.Locale.US, "%.1fm", it) } ?: "--",
                 color = when {
+                    activeType is WarningType.ForwardCollision -> DangerRed
                     vehicleDistance == null -> Color.Gray
                     vehicleDistance.distanceMeters < 15f -> DangerRed
                     vehicleDistance.distanceMeters < 25f -> WarningYellow
@@ -544,9 +556,32 @@ fun StatusBar(
                 Text(
                     String.format(java.util.Locale.US, "%.1fs", vehicleDistance.timeToCollision),
                     color = when {
+                        activeType is WarningType.ForwardCollision -> DangerRed
                         vehicleDistance.timeToCollision < 2f -> DangerRed
                         vehicleDistance.timeToCollision < 4f -> WarningYellow
                         else -> SafeGreen
+                    },
+                    style = MaterialTheme.typography.titleSmall
+                )
+            }
+        }
+
+        // Gate phase indicator (CONFIRMING = gelb, ACTIVE = rot)
+        (alertState as? AlertState.Warning)?.let { warning ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("ALERT", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(
+                    when (warning.phase) {
+                        AlertPhase.CONFIRMING -> "…"
+                        AlertPhase.ACTIVE -> when (warning.type) {
+                            is WarningType.ForwardCollision -> "COLL"
+                            is WarningType.LaneDepartureLeft -> "LEFT"
+                            is WarningType.LaneDepartureRight -> "RIGHT"
+                        }
+                    },
+                    color = when (warning.phase) {
+                        AlertPhase.CONFIRMING -> WarningYellow
+                        AlertPhase.ACTIVE -> DangerRed
                     },
                     style = MaterialTheme.typography.titleSmall
                 )
@@ -577,7 +612,7 @@ fun PermissionRequest(
     }
 }
 
-private fun playWarning(context: Context, warning: WarningType) {
+private fun playAlert(context: Context, signal: AlertSignal) {
     try {
         val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -589,11 +624,16 @@ private fun playWarning(context: Context, warning: WarningType) {
 
         vibrator?.let { v ->
             if (!v.hasVibrator()) return
-            val effect = when (warning) {
+            val effect = when (signal.type) {
                 is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight ->
                     VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE)
                 is WarningType.ForwardCollision ->
-                    VibrationEffect.createWaveform(longArrayOf(0, 300, 100, 300), -1)
+                    if (signal.urgent) {
+                        // Escalated collision: longer, more insistent pattern
+                        VibrationEffect.createWaveform(longArrayOf(0, 400, 80, 400, 80, 400), -1)
+                    } else {
+                        VibrationEffect.createWaveform(longArrayOf(0, 300, 100, 300), -1)
+                    }
             }
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
                 v.vibrate(effect, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_ALARM))
