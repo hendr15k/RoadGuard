@@ -13,8 +13,8 @@ android {
         applicationId = "com.roadguard.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "v1.0.50"
+        versionCode = 11
+        versionName = "v1.0.51"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -83,6 +83,7 @@ dependencies {
 
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
 
     implementation("com.google.code.gson:gson:2.10.1")
 

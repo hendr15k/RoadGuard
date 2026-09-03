@@ -2,8 +2,9 @@ package com.roadguard.app.data.ml
 
 import android.content.Context
 import android.graphics.Bitmap
-import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import java.io.File
 import java.nio.ByteBuffer
@@ -59,8 +60,13 @@ class UfldLaneDetector(private val context: Context) {
     }
 
     private var interpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
+    private var nnApiDelegate: NnApiDelegate? = null
     private var cachedInput: ByteBuffer? = null
     private var cachedOutput: ByteBuffer? = null
+    /** Which execution path the interpreter actually uses (for diagnostics). */
+    var activeBackend: String = "none"
+        private set
 
     // EMA state per side, keyed "L"/"R". Shapes must match to blend.
     private val emaState = mutableMapOf<String, LanePoints>()
@@ -76,9 +82,57 @@ class UfldLaneDetector(private val context: Context) {
             val modelFile = File(File(context.filesDir, ModelDownloader.MODEL_DIR), fileName)
             if (!modelFile.exists()) return
             val buffer = FileUtil.loadMappedFile(context, modelFile.absolutePath)
-            val old = interpreter
-            interpreter = Interpreter(buffer)
-            old?.close()
+            closeLocked()
+            // float16-quant UFLD: GPU first (Adreno/Mali handle fp16 well),
+            // then NNAPI, then 4-thread CPU. Each delegate is tried with a
+            // probe inference; failures fall through to the next backend.
+            val options = Interpreter.Options().setNumThreads(4)
+            var backend = "cpu"
+            try {
+                val gpu = GpuDelegate()
+                options.addDelegate(gpu)
+                val probe = Interpreter(buffer, options)
+                try {
+                    probe.run(obtainInput(), obtainOutput())
+                    gpuDelegate = gpu
+                    backend = "gpu"
+                    probe.close()
+                } catch (e: Exception) {
+                    try { probe.close() } catch (_: Exception) {}
+                    try { gpu.close() } catch (_: Exception) {}
+                    options.addDelegate(null)
+                    throw e
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            if (backend == "cpu") {
+                try {
+                    val nnapi = NnApiDelegate()
+                    val nnOptions = Interpreter.Options().setNumThreads(4).addDelegate(nnapi)
+                    val probe = Interpreter(buffer, nnOptions)
+                    try {
+                        probe.run(obtainInput(), obtainOutput())
+                        nnApiDelegate = nnapi
+                        backend = "nnapi"
+                        probe.close()
+                    } catch (e: Exception) {
+                        try { probe.close() } catch (_: Exception) {}
+                        try { nnapi.close() } catch (_: Exception) {}
+                        nnApiDelegate = null
+                        throw e
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            val finalOptions = Interpreter.Options().setNumThreads(4)
+            gpuDelegate?.let { finalOptions.addDelegate(it) }
+            if (backend == "nnapi") {
+                nnApiDelegate?.let { finalOptions.addDelegate(it) }
+            }
+            interpreter = Interpreter(buffer, finalOptions)
+            activeBackend = backend
             cachedInput = null
             cachedOutput = null
         } catch (e: Exception) {
@@ -86,14 +140,31 @@ class UfldLaneDetector(private val context: Context) {
         }
     }
 
-    @Synchronized
-    fun close() {
+    private fun closeLocked() {
         try {
             interpreter?.close()
         } catch (e: Exception) {
             e.printStackTrace()
         }
         interpreter = null
+        try {
+            gpuDelegate?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        gpuDelegate = null
+        try {
+            nnApiDelegate?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        nnApiDelegate = null
+        activeBackend = "none"
+    }
+
+    @Synchronized
+    fun close() {
+        closeLocked()
         cachedInput = null
         cachedOutput = null
     }
