@@ -40,7 +40,6 @@ class MlDetectionAnalyzer(
     )
 
     private val laneDetector = LaneDetector(laneSensitivity)
-    private var tfliteRunner: TfliteModelRunner? = null
     private var ufldDetector: UfldLaneDetector? = null
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
@@ -81,9 +80,6 @@ class MlDetectionAnalyzer(
     @Volatile
     private var closed = false
 
-    @Volatile
-    private var modelLoadAttempted = false
-
     /** Guards the ML Kit detector so close() cannot dispose it mid-frame. */
     private val detectorLock = Any()
     private var ufldRetryAtMs = 0L
@@ -96,11 +92,6 @@ class MlDetectionAnalyzer(
         // Only construct the runners here. Mapping models and building the
         // native interpreters belongs on the analyzer thread, not in composition.
         appContext?.let { ctx ->
-            try {
-                tfliteRunner = TfliteModelRunner(ctx)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
             try {
                 ufldDetector = UfldLaneDetector(ctx)
             } catch (e: Exception) {
@@ -128,19 +119,6 @@ class MlDetectionAnalyzer(
             }
         }
         return ufldDetector?.takeIf { it.isLoaded() }
-    }
-
-    private fun ensureModelLoaded() {
-        if (modelLoadAttempted) return
-        synchronized(modelLock) {
-            if (modelLoadAttempted) return
-            modelLoadAttempted = true
-            try {
-                tfliteRunner?.loadModel()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -231,8 +209,8 @@ class MlDetectionAnalyzer(
             val uprightHeight = if (uprightLandscape) imageProxy.height else imageProxy.width
 
             // UFLD first: direct lane points instead of histogram hunting. Falls
-            // back to classic CV when no model is downloaded or no ego pair is
-            // found; DeepLab stays as the last-resort drift signal.
+            // back to classic CV when no model is present or no ego pair is
+            // found.
             val ufld = ensureUfldLoaded()
             var ufldResult: UfldLaneDetector.UfldResult? = null
             if (ufld != null) {
@@ -255,35 +233,6 @@ class MlDetectionAnalyzer(
                 }
             }
             val ufldOk = ufldResult != null && (ufldResult.left != null || ufldResult.right != null)
-
-            var tfliteDriftL = false
-            var tfliteDriftR = false
-            var tfliteConf = 0.05f
-            var tfliteCenterOffset = 0f
-
-            ensureModelLoaded()
-            val runner = tfliteRunner
-            if (runner != null && runner.isLoaded()) {
-                try {
-                    val segmentation = runner.runSegmentationYUV(
-                        yBuffer, yPlane.rowStride, yPlane.pixelStride,
-                        uBuffer, uPlane.rowStride, uPlane.pixelStride,
-                        vBuffer, vPlane.rowStride, vPlane.pixelStride,
-                        imageProxy.width, imageProxy.height, rotationDegrees
-                    )
-                    val segResult = runner.detectLanesFromSegmentation(
-                        segmentation[0],
-                        uprightWidth,
-                        uprightHeight
-                    )
-                    tfliteDriftL = segResult.isDriftingLeft
-                    tfliteDriftR = segResult.isDriftingRight
-                    tfliteConf = segResult.confidence
-                    tfliteCenterOffset = segResult.centerOffset
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
 
             val finalIsDriftingLeft: Boolean
             val finalIsDriftingRight: Boolean
@@ -312,12 +261,10 @@ class MlDetectionAnalyzer(
                 leftCurve = ufldCurves.first
                 rightCurve = ufldCurves.second
             } else {
-                val finalIsDriftingLeftCv = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
-                val finalIsDriftingRightCv = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
-                finalIsDriftingLeft = finalIsDriftingLeftCv
-                finalIsDriftingRight = finalIsDriftingRightCv
-                finalConfidence = maxOf(swResult.confidence, tfliteConf)
-                finalCenterOffset = if (swResult.confidence > 0.3f) swResult.centerOffset else tfliteCenterOffset
+                finalIsDriftingLeft = swResult.isDriftingLeft
+                finalIsDriftingRight = swResult.isDriftingRight
+                finalConfidence = swResult.confidence
+                finalCenterOffset = swResult.centerOffset
                 finalLaneWidth = swResult.laneWidth
                 leftVisible = swResult.leftLane?.valid == true
                 rightVisible = swResult.rightLane?.valid == true
@@ -734,11 +681,6 @@ class MlDetectionAnalyzer(
         synchronized(detectorLock) {
             try {
                 objectDetector.close()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-            try {
-                tfliteRunner?.close()
             } catch (e: Exception) {
                 e.printStackTrace()
             }

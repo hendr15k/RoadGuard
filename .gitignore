@@ -1,16 +1,9 @@
-# Gradle
+# UFLD lane model (117 MB) is bundled locally at build time;
+# the canonical copy lives as a GitHub release asset (see ModelDownloader).
+app/src/main/assets/ufld_tusimple_float16.tflite
+
+# Build outputs
 .gradle/
+app/build/
 build/
 local.properties
-
-# IDE
-.idea/
-*.iml
-.vscode/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log

@@ -36,7 +36,6 @@ class VideoMlAnalyzer(
     )
 
     private val laneDetector = LaneDetector(laneSensitivity)
-    private var tfliteRunner: TfliteModelRunner? = null
     private var ufldDetector: UfldLaneDetector? = null
     private var ufldRetryAtMs = 0L
     private companion object {
@@ -70,9 +69,6 @@ class VideoMlAnalyzer(
     @Volatile
     private var closed = false
 
-    @Volatile
-    private var modelLoadAttempted = false
-
     /** Guards the ML Kit detector so close() cannot dispose it mid-frame. */
     private val detectorLock = Any()
 
@@ -80,11 +76,6 @@ class VideoMlAnalyzer(
         // Only construct the runners here; loading maps the model and builds the
         // native interpreter, which must not happen during composition.
         appContext?.let { ctx ->
-            try {
-                tfliteRunner = TfliteModelRunner(ctx)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
             try {
                 ufldDetector = UfldLaneDetector(ctx)
             } catch (e: Exception) {
@@ -114,19 +105,6 @@ class VideoMlAnalyzer(
         return ufldDetector?.takeIf { it.isLoaded() }
     }
 
-    private fun ensureModelLoaded() {
-        if (modelLoadAttempted) return
-        synchronized(modelLock) {
-            if (modelLoadAttempted) return
-            modelLoadAttempted = true
-            try {
-                tfliteRunner?.loadModel()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
     fun analyzeFrame(bitmap: Bitmap, height: Int) {
         if (closed) {
             bitmap.recycle()
@@ -146,7 +124,7 @@ class VideoMlAnalyzer(
         try {
             // UFLD first: direct lane points instead of histogram hunting. Falls
             // back to classic CV when no model is present or no ego pair is
-            // found; DeepLab stays as the last-resort drift signal.
+            // found.
             //
             // ORDER MATTERS: classic CV (LaneDetector.detectLanes, ~50-60 ms)
             // must NOT run before UFLD on every frame. detectLanes() costs a
@@ -178,28 +156,6 @@ class VideoMlAnalyzer(
                 return r
             }
 
-            var tfliteDriftL = false
-            var tfliteDriftR = false
-            var tfliteConf = 0.05f
-            var tfliteCenterOffset = 0f
-
-            ensureModelLoaded()
-            val runner = tfliteRunner
-            if (runner != null && runner.isLoaded()) {
-                try {
-                    val segmentation = runner.runSegmentation(bitmap)
-                    val segResult = runner.detectLanesFromSegmentation(
-                        segmentation[0], bitmap.width, bitmap.height
-                    )
-                    tfliteDriftL = segResult.isDriftingLeft
-                    tfliteDriftR = segResult.isDriftingRight
-                    tfliteConf = segResult.confidence
-                    tfliteCenterOffset = segResult.centerOffset
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
             val finalIsDriftingLeft: Boolean
             val finalIsDriftingRight: Boolean
             val finalConfidence: Float
@@ -221,10 +177,10 @@ class VideoMlAnalyzer(
                 if (!leftOk && !rightOk) {
                     // Both stubs: treat as UFLD miss, run classic fallback.
                     val cv = sw()
-                    finalIsDriftingLeft = if (cv.confidence > 0.3f) cv.isDriftingLeft else tfliteDriftL
-                    finalIsDriftingRight = if (cv.confidence > 0.3f) cv.isDriftingRight else tfliteDriftR
-                    finalConfidence = maxOf(cv.confidence, tfliteConf)
-                    finalCenterOffset = if (cv.confidence > 0.3f) cv.centerOffset else tfliteCenterOffset
+                    finalIsDriftingLeft = cv.isDriftingLeft
+                    finalIsDriftingRight = cv.isDriftingRight
+                    finalConfidence = cv.confidence
+                    finalCenterOffset = cv.centerOffset
                     finalLaneWidth = cv.laneWidth
                     leftMark = if (cv.leftLane?.valid == true) "L" else "-"
                     rightMark = if (cv.rightLane?.valid == true) "R" else "-"
@@ -255,10 +211,10 @@ class VideoMlAnalyzer(
                 }
             } else {
                 val cv = sw()
-                finalIsDriftingLeft = if (cv.confidence > 0.3f) cv.isDriftingLeft else tfliteDriftL
-                finalIsDriftingRight = if (cv.confidence > 0.3f) cv.isDriftingRight else tfliteDriftR
-                finalConfidence = maxOf(cv.confidence, tfliteConf)
-                finalCenterOffset = if (cv.confidence > 0.3f) cv.centerOffset else tfliteCenterOffset
+                finalIsDriftingLeft = cv.isDriftingLeft
+                finalIsDriftingRight = cv.isDriftingRight
+                finalConfidence = cv.confidence
+                finalCenterOffset = cv.centerOffset
                 finalLaneWidth = cv.laneWidth
                 leftMark = if (cv.leftLane?.valid == true) "L" else "-"
                 rightMark = if (cv.rightLane?.valid == true) "R" else "-"
@@ -280,8 +236,8 @@ class VideoMlAnalyzer(
             // -1.00 marks "not computed" in the log.
             val swConf = if (swResult != null) sw()?.confidence ?: -1f else -1f
             android.util.Log.d("LaneTracking",
-                "sw=%.2f tf=%.2f cf=%.2f dL=%b dR=%b lanes=%s offset=%.1f width=%.0f".format(
-                    swConf, tfliteConf, finalConfidence,
+                "sw=%.2f cf=%.2f dL=%b dR=%b lanes=%s offset=%.1f width=%.0f".format(
+                    swConf, finalConfidence,
                     finalIsDriftingLeft, finalIsDriftingRight,
                     leftMark + rightMark, finalCenterOffset, finalLaneWidth
                 )
@@ -621,11 +577,6 @@ class VideoMlAnalyzer(
         synchronized(detectorLock) {
             try {
                 objectDetector.close()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-            try {
-                tfliteRunner?.close()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
