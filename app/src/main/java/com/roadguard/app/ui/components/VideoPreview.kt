@@ -189,15 +189,44 @@ private fun startFrameProcessing(
                                 // wenn die Maße passen — wir dürfen NICHT das
                                 // Original recyclen, weil ExoPlayer es noch
                                 // referenziert.
+                                //
+                                // ASPECT: Der Frame muss seitenrichtig auf
+                                // 640x360 gebracht werden — NICHT verzerrt.
+                                // Das alte createScaledBitmap(640,360) hat ein
+                                // 480x640-Portrait-Posterframe (oder jedes
+                                // andere Seitenverhältnis) auf Landscape
+                                // gequetscht: alle Kurven/Offsets danach waren
+                                // systematisch falsch (VM: Overlay im Himmel).
+                                // Wir croppen center auf 16:9 und skalieren
+                                // dann — gleiche Geometrie wie der Player.
+                                val srcW = bitmap.width
+                                val srcH = bitmap.height
                                 val targetW = 640
                                 val targetH = 360
-                                val needsScale = bitmap.width != targetW || bitmap.height != targetH
-                                val scaledBitmap = if (needsScale) {
-                                    Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+                                val targetAspect = targetW.toFloat() / targetH
+                                val srcAspect = srcW.toFloat() / srcH.coerceAtLeast(1)
+                                val cropped: android.graphics.Bitmap
+                                if (kotlin.math.abs(srcAspect - targetAspect) < 0.02f) {
+                                    cropped = bitmap
+                                } else if (srcAspect > targetAspect) {
+                                    // Zu breit: Seiten croppen.
+                                    val cropW = (srcH * targetAspect).toInt().coerceIn(1, srcW)
+                                    val x0 = ((srcW - cropW) / 2).coerceAtLeast(0)
+                                    cropped = android.graphics.Bitmap.createBitmap(bitmap, x0, 0, cropW, srcH)
+                                    if (cropped !== bitmap) bitmap.recycle()
                                 } else {
-                                    bitmap
+                                    // Zu hoch (Portrait-Posterframe): oben/unten croppen.
+                                    val cropH = (srcW / targetAspect).toInt().coerceIn(1, srcH)
+                                    val y0 = ((srcH - cropH) / 2).coerceAtLeast(0)
+                                    cropped = android.graphics.Bitmap.createBitmap(bitmap, 0, y0, srcW, cropH)
+                                    if (cropped !== bitmap) bitmap.recycle()
                                 }
-                                if (scaledBitmap !== bitmap) bitmap.recycle()
+                                val scaledBitmap = if (cropped.width != targetW || cropped.height != targetH) {
+                                    android.graphics.Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
+                                } else {
+                                    cropped
+                                }
+                                if (scaledBitmap !== cropped) cropped.recycle()
 
                                 val argbBitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, false)
                                 scaledBitmap.recycle()

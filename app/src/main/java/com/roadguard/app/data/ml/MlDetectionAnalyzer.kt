@@ -285,7 +285,9 @@ class MlDetectionAnalyzer(
             if (ufldOk) {
                 // UFLD won: fit curves through its points, derive offset/width
                 // from the fitted pair. Classic CV is skipped entirely.
-                val ufldCurves = ufldCurvesToDomain(ufldResult!!)
+                // Span-gated like the video path: stub sides come back
+                // invalid and are hidden instead of floating in the sky.
+                val ufldCurves = ufldCurvesToDomain(ufldResult!!, uprightHeight)
                 val ufldOff = ufldCenterOffset(ufldResult, uprightWidth)
                 val driftGate = 0.04f * (1.5f - laneSensitivity)
                 finalIsDriftingLeft = ufldOff < -uprightWidth * driftGate && ufldResult.confidence > 0.4f
@@ -293,8 +295,8 @@ class MlDetectionAnalyzer(
                 finalConfidence = ufldResult.confidence
                 finalCenterOffset = ufldOff
                 finalLaneWidth = ufldLaneWidth(ufldResult)
-                leftVisible = ufldResult.left != null
-                rightVisible = ufldResult.right != null
+                leftVisible = ufldResult.left != null && ufldCurves.first.valid
+                rightVisible = ufldResult.right != null && ufldCurves.second.valid
                 leftCurve = ufldCurves.first
                 rightCurve = ufldCurves.second
             } else {
@@ -396,15 +398,21 @@ class MlDetectionAnalyzer(
     }
 
     private fun ufldPointsToCurve(
-        pts: UfldLaneDetector.LanePoints?
+        pts: UfldLaneDetector.LanePoints?,
+        imgH: Int = 0
     ): com.roadguard.app.domain.model.LaneCurve {
         if (pts == null || pts.size < 3) return com.roadguard.app.domain.model.LaneCurve()
-        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
         var yMin = pts.y[0]; var yMax = pts.y[0]
         for (y in pts.y) {
             if (y < yMin) yMin = y
             if (y > yMax) yMax = y
         }
+        // Span gate (same as video path): reject short stubs (curb
+        // fragments) whose extrapolation would float in the sky.
+        if (imgH > 0 && yMax - yMin < imgH * 0.35f) {
+            return com.roadguard.app.domain.model.LaneCurve()
+        }
+        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
         return com.roadguard.app.domain.model.LaneCurve(
             a = abc.first, b = abc.second, c = abc.third,
             yStart = yMin, yEnd = yMax, valid = true
@@ -412,9 +420,10 @@ class MlDetectionAnalyzer(
     }
 
     private fun ufldCurvesToDomain(
-        res: UfldLaneDetector.UfldResult
+        res: UfldLaneDetector.UfldResult,
+        imgH: Int = 0
     ): Pair<com.roadguard.app.domain.model.LaneCurve, com.roadguard.app.domain.model.LaneCurve> {
-        return Pair(ufldPointsToCurve(res.left), ufldPointsToCurve(res.right))
+        return Pair(ufldPointsToCurve(res.left, imgH), ufldPointsToCurve(res.right, imgH))
     }
 
     private fun ufldLaneCenterX(pts: UfldLaneDetector.LanePoints?): Float? {

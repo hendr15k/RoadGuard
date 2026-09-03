@@ -203,18 +203,47 @@ class VideoMlAnalyzer(
             if (ufldOk) {
                 // UFLD won: fit curves through its points, derive offset/width
                 // from the fitted pair. Classic CV is skipped entirely.
-                val curves = ufldCurvesToDomain(ufldResult!!)
-                val ufldOff = ufldCenterOffset(ufldResult, bitmap.width)
-                val driftGate = 0.04f * (1.5f - laneSensitivity)
-                finalIsDriftingLeft = ufldOff < -bitmap.width * driftGate && ufldResult.confidence > 0.4f
-                finalIsDriftingRight = ufldOff > bitmap.width * driftGate && ufldResult.confidence > 0.4f
-                finalConfidence = ufldResult.confidence
-                finalCenterOffset = ufldOff
-                finalLaneWidth = ufldLaneWidth(ufldResult)
-                leftMark = if (ufldResult.left != null) "L" else "-"
-                rightMark = if (ufldResult.right != null) "R" else "-"
-                leftCurve = curves.first
-                rightCurve = curves.second
+                // Span-gated: stub curves (short y-range, e.g. curb) come
+                // back invalid -> that side is not drawn and drops to the
+                // classic fallback below instead of floating in the sky.
+                val curves = ufldCurvesToDomain(ufldResult!!, bitmap.height)
+                val leftOk = curves.first.valid
+                val rightOk = curves.second.valid
+                if (!leftOk && !rightOk) {
+                    // Both stubs: treat as UFLD miss, run classic fallback.
+                    val cv = sw()
+                    finalIsDriftingLeft = if (cv.confidence > 0.3f) cv.isDriftingLeft else tfliteDriftL
+                    finalIsDriftingRight = if (cv.confidence > 0.3f) cv.isDriftingRight else tfliteDriftR
+                    finalConfidence = maxOf(cv.confidence, tfliteConf)
+                    finalCenterOffset = if (cv.confidence > 0.3f) cv.centerOffset else tfliteCenterOffset
+                    finalLaneWidth = cv.laneWidth
+                    leftMark = if (cv.leftLane?.valid == true) "L" else "-"
+                    rightMark = if (cv.rightLane?.valid == true) "R" else "-"
+                    leftCurve = cv.leftLane?.let { l ->
+                        com.roadguard.app.domain.model.LaneCurve(
+                            a = l.polyA, b = l.polyB, c = l.polyC,
+                            yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
+                        )
+                    } ?: com.roadguard.app.domain.model.LaneCurve()
+                    rightCurve = cv.rightLane?.let { l ->
+                        com.roadguard.app.domain.model.LaneCurve(
+                            a = l.polyA, b = l.polyB, c = l.polyC,
+                            yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
+                        )
+                    } ?: com.roadguard.app.domain.model.LaneCurve()
+                } else {
+                    val ufldOff = ufldCenterOffset(ufldResult, bitmap.width)
+                    val driftGate = 0.04f * (1.5f - laneSensitivity)
+                    finalIsDriftingLeft = ufldOff < -bitmap.width * driftGate && ufldResult.confidence > 0.4f
+                    finalIsDriftingRight = ufldOff > bitmap.width * driftGate && ufldResult.confidence > 0.4f
+                    finalConfidence = ufldResult.confidence
+                    finalCenterOffset = ufldOff
+                    finalLaneWidth = ufldLaneWidth(ufldResult)
+                    leftMark = if (ufldResult.left != null && leftOk) "L" else "-"
+                    rightMark = if (ufldResult.right != null && rightOk) "R" else "-"
+                    leftCurve = curves.first
+                    rightCurve = curves.second
+                }
             } else {
                 val cv = sw()
                 finalIsDriftingLeft = if (cv.confidence > 0.3f) cv.isDriftingLeft else tfliteDriftL
@@ -422,15 +451,26 @@ class VideoMlAnalyzer(
     }
 
     private fun ufldPointsToCurve(
-        pts: UfldLaneDetector.LanePoints?
+        pts: UfldLaneDetector.LanePoints?,
+        imgH: Int = 0
     ): com.roadguard.app.domain.model.LaneCurve {
         if (pts == null || pts.size < 3) return com.roadguard.app.domain.model.LaneCurve()
-        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
         var yMin = pts.y[0]; var yMax = pts.y[0]
         for (y in pts.y) {
             if (y < yMin) yMin = y
             if (y > yMax) yMax = y
         }
+        // Span gate: a real ego boundary runs most of the frame height.
+        // UFLD sometimes returns a short stub (a few rows near the horizon,
+        // e.g. a curb fragment) that fitQuadratic happily fits — the overlay
+        // then extrapolates the stub across the whole frame and the corridor
+        // floats in the sky. Reject stubs instead of drawing them.
+        // pts.y are IMAGE pixels (runInference scales CFG->image), so the
+        // span is tested against the real frame height.
+        if (imgH > 0 && yMax - yMin < imgH * 0.35f) {
+            return com.roadguard.app.domain.model.LaneCurve()
+        }
+        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
         return com.roadguard.app.domain.model.LaneCurve(
             a = abc.first, b = abc.second, c = abc.third,
             yStart = yMin, yEnd = yMax, valid = true
@@ -438,9 +478,10 @@ class VideoMlAnalyzer(
     }
 
     private fun ufldCurvesToDomain(
-        res: UfldLaneDetector.UfldResult
+        res: UfldLaneDetector.UfldResult,
+        imgH: Int = 0
     ): Pair<com.roadguard.app.domain.model.LaneCurve, com.roadguard.app.domain.model.LaneCurve> {
-        return Pair(ufldPointsToCurve(res.left), ufldPointsToCurve(res.right))
+        return Pair(ufldPointsToCurve(res.left, imgH), ufldPointsToCurve(res.right, imgH))
     }
 
     private fun ufldLaneCenterX(pts: UfldLaneDetector.LanePoints?): Float? {
