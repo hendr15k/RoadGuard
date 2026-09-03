@@ -3,12 +3,12 @@ package com.roadguard.app.data.ml
 import android.content.Context
 import android.graphics.Bitmap
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.GpuDelegate
-import org.tensorflow.lite.nnapi.NnApiDelegate
-import org.tensorflow.lite.support.common.FileUtil
 import java.io.File
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import kotlin.math.abs
 
 /**
@@ -60,8 +60,10 @@ class UfldLaneDetector(private val context: Context) {
     }
 
     private var interpreter: Interpreter? = null
-    private var gpuDelegate: GpuDelegate? = null
-    private var nnApiDelegate: NnApiDelegate? = null
+    // Held as Delegate (not GpuDelegate/NnApiDelegate) so this file compiles
+    // even when the optional tensorflow-lite-gpu artifact is missing.
+    private var gpuDelegate: org.tensorflow.lite.Delegate? = null
+    private var nnApiDelegate: org.tensorflow.lite.Delegate? = null
     private var cachedInput: ByteBuffer? = null
     private var cachedOutput: ByteBuffer? = null
     /** Which execution path the interpreter actually uses (for diagnostics). */
@@ -80,16 +82,34 @@ class UfldLaneDetector(private val context: Context) {
     fun loadModel(fileName: String = MODEL_FILE) {
         try {
             val modelFile = File(File(context.filesDir, ModelDownloader.MODEL_DIR), fileName)
-            if (!modelFile.exists()) return
-            val buffer = FileUtil.loadMappedFile(context, modelFile.absolutePath)
+            if (!modelFile.exists()) {
+                android.util.Log.w("UfldLaneDetector", "model missing: ${modelFile.absolutePath}")
+                return
+            }
+            android.util.Log.i("UfldLaneDetector", "loading ${modelFile.absolutePath} (${modelFile.length()} bytes)")
+            // NOTE: FileUtil.loadMappedFile(context, path) treats `path` as an
+            // ASSET name (AssetManager.openFd) — never pass an absolute file
+            // path to it. Map the file directly instead.
+            val buffer: MappedByteBuffer = FileInputStream(modelFile).channel.use { ch ->
+                ch.map(FileChannel.MapMode.READ_ONLY, 0, modelFile.length())
+            }
             closeLocked()
             // float16-quant UFLD: GPU first (Adreno/Mali handle fp16 well),
             // then NNAPI, then 4-thread CPU. Each delegate is tried with a
             // probe inference; failures fall through to the next backend.
+            //
+            // NOTE: both delegates are loaded via REFLECTION, never via direct
+            // constructor calls. The GPU classes live in the separate
+            // tensorflow-lite-gpu artifact — if its classes or native libs are
+            // missing on a device (e.g. x86_64 emulator), a direct
+            // `GpuDelegate()` reference throws NoClassDefFoundError (an Error,
+            // not an Exception) and kills the analyzer thread. Reflection
+            // turns that into a catchable failure and a clean CPU fallback.
             val options = Interpreter.Options().setNumThreads(4)
             var backend = "cpu"
             try {
-                val gpu = GpuDelegate()
+                val gpu = newDelegate("org.tensorflow.lite.gpu.GpuDelegate")
+                    ?: throw ClassNotFoundException("GpuDelegate not on classpath")
                 options.addDelegate(gpu)
                 val probe = Interpreter(buffer, options)
                 try {
@@ -97,18 +117,19 @@ class UfldLaneDetector(private val context: Context) {
                     gpuDelegate = gpu
                     backend = "gpu"
                     probe.close()
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     try { probe.close() } catch (_: Exception) {}
                     try { gpu.close() } catch (_: Exception) {}
                     options.addDelegate(null)
                     throw e
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
+            } catch (e: Throwable) {
+                android.util.Log.i("UfldLaneDetector", "GPU delegate unavailable, trying NNAPI: ${e.message}")
             }
             if (backend == "cpu") {
                 try {
-                    val nnapi = NnApiDelegate()
+                    val nnapi = newDelegate("org.tensorflow.lite.nnapi.NnApiDelegate")
+                        ?: throw ClassNotFoundException("NnApiDelegate not on classpath")
                     val nnOptions = Interpreter.Options().setNumThreads(4).addDelegate(nnapi)
                     val probe = Interpreter(buffer, nnOptions)
                     try {
@@ -116,14 +137,14 @@ class UfldLaneDetector(private val context: Context) {
                         nnApiDelegate = nnapi
                         backend = "nnapi"
                         probe.close()
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         try { probe.close() } catch (_: Exception) {}
                         try { nnapi.close() } catch (_: Exception) {}
                         nnApiDelegate = null
                         throw e
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                } catch (e: Throwable) {
+                    android.util.Log.i("UfldLaneDetector", "NNAPI delegate unavailable, using CPU: ${e.message}")
                 }
             }
             val finalOptions = Interpreter.Options().setNumThreads(4)
@@ -133,9 +154,11 @@ class UfldLaneDetector(private val context: Context) {
             }
             interpreter = Interpreter(buffer, finalOptions)
             activeBackend = backend
+            android.util.Log.i("UfldLaneDetector", "loaded backend=$backend input=${INPUT_W}x$INPUT_H")
             cachedInput = null
             cachedOutput = null
         } catch (e: Exception) {
+            android.util.Log.e("UfldLaneDetector", "load failed", e)
             e.printStackTrace()
         }
     }
@@ -160,6 +183,22 @@ class UfldLaneDetector(private val context: Context) {
         }
         nnApiDelegate = null
         activeBackend = "none"
+    }
+
+    /**
+     * Instantiate a TFLite Delegate by class name via reflection.
+     * Returns null when the class is absent (optional artifact not packaged)
+     * — callers fall through to the next backend. Never reference delegate
+     * classes directly: on devices without the artifact that throws
+     * NoClassDefFoundError (an Error, not an Exception).
+     */
+    private fun newDelegate(className: String): org.tensorflow.lite.Delegate? {
+        return try {
+            val clazz = Class.forName(className)
+            clazz.getDeclaredConstructor().newInstance() as? org.tensorflow.lite.Delegate
+        } catch (e: Throwable) {
+            null
+        }
     }
 
     @Synchronized
@@ -207,10 +246,48 @@ class UfldLaneDetector(private val context: Context) {
         return try {
             val lanes = runInference(itp, bitmap)
             val pair = chooseEgoPair(lanes, bitmap.width)
+            // Per-frame diagnostics: which path the device actually takes.
+            // Logged every 10th frame (plus every miss) so VM logcat shows
+            // hit rate without spamming. Sizes are per-lane point counts.
+            val sizes = lanes.map { it?.size ?: 0 }
             if (pair == null) {
-                holdLast()
+                // Single-lane fallback before decaying: if exactly one side
+                // has candidates, mirror it to the missing side at the
+                // expected ego width. Confidence is capped — the mirrored
+                // side is a guess, but a one-sided overlay beats "no lanes".
+                val single = singleSideLane(lanes, bitmap.width)
+                if (frameCounter % 10 == 0L || single == null) {
+                    android.util.Log.d(
+                        "UfldLaneDetector",
+                        "frame=$frameCounter backend=$activeBackend " +
+                            "sizes=${sizes} pair=none " +
+                            "single=${single ?: "none"} " +
+                            "img=${bitmap.width}x${bitmap.height}"
+                    )
+                }
+                if (single != null) {
+                    val (side, pts) = single
+                    val mirrored = if (side == "L") {
+                        Pair(smooth("L", pts), smooth("R", mirrorLane(pts, bitmap.width, toRight = true)!!))
+                    } else {
+                        Pair(smooth("L", mirrorLane(pts, bitmap.width, toRight = false)!!), smooth("R", pts))
+                    }
+                    val nPts = pts.size / NUM_ROWS.toFloat()
+                    val conf = (0.35f + minOf(1f, nPts * 1.5f) * 0.3f).coerceIn(0f, 0.65f)
+                    UfldResult(mirrored.first, mirrored.second, conf, true, mirrored = true)
+                } else {
+                    holdLast()
+                }
             } else {
                 val (li, ri) = pair
+                if (frameCounter % 10 == 0L) {
+                    android.util.Log.d(
+                        "UfldLaneDetector",
+                        "frame=$frameCounter backend=$activeBackend " +
+                            "sizes=${sizes} pair=$pair " +
+                            "img=${bitmap.width}x${bitmap.height}"
+                    )
+                }
                 val left = smooth("L", lanes[li]!!)
                 val right = smooth("R", lanes[ri]!!)
                 val nPts = (lanes[li]!!.size + lanes[ri]!!.size) / (2f * NUM_ROWS)
@@ -220,6 +297,40 @@ class UfldLaneDetector(private val context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
             UfldResult(null, null, 0f, false)
+        }
+    }
+
+    /**
+     * Strongest single-side lane when no left+right pair exists. Returns
+     * ("L"|"R", points) or null when neither side has a usable candidate.
+     * A side is usable when it holds the most-points lane on that side of
+     * the image center.
+     */
+    internal fun singleSideLane(lanes: Array<LanePoints?>, imgW: Int): Pair<String, LanePoints>? {
+        val mid = imgW / 2f
+        var bestL: LanePoints? = null
+        var bestR: LanePoints? = null
+        for (l in lanes) {
+            if (l == null || l.size < MIN_POINTS) continue
+            var maxY = Float.NEGATIVE_INFINITY
+            var xAtMaxY = 0f
+            for (j in 0 until l.size) {
+                if (l.y[j] > maxY) {
+                    maxY = l.y[j]
+                    xAtMaxY = l.x[j]
+                }
+            }
+            if (xAtMaxY < mid) {
+                if (bestL == null || l.size > bestL.size) bestL = l
+            } else {
+                if (bestR == null || l.size > bestR.size) bestR = l
+            }
+        }
+        return when {
+            bestL != null && bestR != null -> null // both sides -> pair path owns this
+            bestL != null -> Pair("L", bestL)
+            bestR != null -> Pair("R", bestR)
+            else -> null
         }
     }
 
@@ -335,6 +446,14 @@ class UfldLaneDetector(private val context: Context) {
      * Ego pair: one lane left of center, one right of center, plausible gap.
      * Prefers TuSimple-semantic indices (1,2) on ties; accepts (0,2)/(1,3)/
      * (0,3) when the model merged or split lanes. Bottom-row x decides.
+     *
+     * SINGLE-LANE FALLBACK: when only one side has candidates (the other side
+     * occluded by traffic, faded paint, glare), the missing side is mirrored
+     * from the visible lane using the expected ego width (~45% of frame).
+     * The mirrored side is flagged via UfldResult.mirrored so callers can
+     * lower confidence. Without this, single-side frames (common on real
+     * roads: trailer ahead, dashed lines, intersections) reported nothing
+     * even though the model saw one boundary clearly.
      */
     internal fun chooseEgoPair(lanes: Array<LanePoints?>, imgW: Int): Pair<Int, Int>? {
         val mid = imgW / 2f
@@ -371,10 +490,26 @@ class UfldLaneDetector(private val context: Context) {
         return best
     }
 
+    /**
+     * Mirror a single visible lane to the missing side using the expected ego
+     * width. Returns the mirrored points in the same image-pixel space, or
+     * null when the visible lane itself is unusable. Y-coordinates are kept;
+     * only X is shifted by halfWidthPx (caller passes imgW*0.45-ish).
+     */
+    internal fun mirrorLane(pts: LanePoints?, imgW: Int, toRight: Boolean): LanePoints? {
+        if (pts == null || pts.size < MIN_POINTS) return null
+        val halfWidth = imgW * 0.45f / 2f
+        val shift = if (toRight) halfWidth else -halfWidth
+        val nx = FloatArray(pts.size) { i -> (pts.x[i] + shift).coerceIn(0f, imgW.toFloat()) }
+        return LanePoints(nx, pts.y.copyOf())
+    }
+
     data class UfldResult(
         val left: LanePoints?,
         val right: LanePoints?,
         val confidence: Float,
-        val bothValid: Boolean
+        val bothValid: Boolean,
+        /** True when one side was mirrored from the other (single-lane fallback). */
+        val mirrored: Boolean = false
     )
 }

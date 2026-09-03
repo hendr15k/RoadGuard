@@ -88,11 +88,77 @@ class UfldLaneDetectorTest {
         assertEquals(56, UfldLaneDetector.NUM_ROWS)
         assertEquals(4, UfldLaneDetector.NUM_LANES)
     }
+
+    @Test
+    fun singleSideLeftReturnsLeftLane() {
+        // Only one lane visible (right occluded): single-side fallback fires.
+        val lanes = arrayOf<UfldLaneDetector.LanePoints?>(
+            null,
+            line(467f, 300f),
+            null,
+            null
+        )
+        val det = UfldLaneDetectorForTest()
+        assertNull("no left+right pair may exist", det.chooseEgoPair(lanes, 1280))
+        val single = det.singleSideLane(lanes, 1280)
+        assertNotNull("single left lane must be found", single)
+        assertEquals("L", single!!.first)
+    }
+
+    @Test
+    fun singleSideRightReturnsRightLane() {
+        val lanes = arrayOf<UfldLaneDetector.LanePoints?>(
+            null,
+            null,
+            line(935f, 560f),
+            null
+        )
+        val det = UfldLaneDetectorForTest()
+        assertNull(det.chooseEgoPair(lanes, 1280))
+        val single = det.singleSideLane(lanes, 1280)
+        assertNotNull(single)
+        assertEquals("R", single!!.first)
+    }
+
+    @Test
+    fun singleSideEmptyWhenNothingVisible() {
+        val lanes = arrayOf<UfldLaneDetector.LanePoints?>(null, null, null, null)
+        val det = UfldLaneDetectorForTest()
+        assertNull(det.singleSideLane(lanes, 1280))
+    }
+
+    @Test
+    fun singleSideEmptyWhenBothSidesPresent() {
+        // Both sides visible: pair path owns it, fallback must stay out.
+        val lanes = arrayOf<UfldLaneDetector.LanePoints?>(
+            null,
+            line(467f, 300f),
+            line(935f, 560f),
+            null
+        )
+        val det = UfldLaneDetectorForTest()
+        assertNotNull(det.chooseEgoPair(lanes, 1280))
+        assertNull(det.singleSideLane(lanes, 1280))
+    }
+
+    @Test
+    fun mirrorLaneShiftsByHalfEgoWidth() {
+        val pts = line(467f, 300f)
+        val det = UfldLaneDetectorForTest()
+        val mirrored = det.mirrorLane(pts, 1280, toRight = true)
+        assertNotNull(mirrored)
+        // 1280 * 0.45 / 2 = 288px shift right.
+        assertEquals(467f + 288f, mirrored!!.x[0], 0.01f)
+        val mirroredL = det.mirrorLane(pts, 1280, toRight = false)
+        assertNotNull(mirroredL)
+        assertEquals(467f - 288f, mirroredL!!.x[0], 0.01f)
+    }
 }
 
 /**
  * chooseEgoPair is internal to the detector (needs Context for the rest);
  * this harness exposes the pure selection logic for JVM tests without Robolectric.
+ * Mirrors UfldLaneDetector.chooseEgoPair/singleSideLane/mirrorLane exactly.
  */
 private class UfldLaneDetectorForTest {
     fun chooseEgoPair(
@@ -130,5 +196,45 @@ private class UfldLaneDetectorForTest {
             }
         }
         return best
+    }
+
+    fun singleSideLane(
+        lanes: Array<UfldLaneDetector.LanePoints?>, imgW: Int
+    ): Pair<String, UfldLaneDetector.LanePoints>? {
+        val mid = imgW / 2f
+        var bestL: UfldLaneDetector.LanePoints? = null
+        var bestR: UfldLaneDetector.LanePoints? = null
+        for (l in lanes) {
+            if (l == null || l.size < 3) continue
+            var maxY = Float.NEGATIVE_INFINITY
+            var xAtMaxY = 0f
+            for (j in 0 until l.size) {
+                if (l.y[j] > maxY) {
+                    maxY = l.y[j]
+                    xAtMaxY = l.x[j]
+                }
+            }
+            if (xAtMaxY < mid) {
+                if (bestL == null || l.size > bestL.size) bestL = l
+            } else {
+                if (bestR == null || l.size > bestR.size) bestR = l
+            }
+        }
+        return when {
+            bestL != null && bestR != null -> null
+            bestL != null -> Pair("L", bestL)
+            bestR != null -> Pair("R", bestR)
+            else -> null
+        }
+    }
+
+    fun mirrorLane(
+        pts: UfldLaneDetector.LanePoints?, imgW: Int, toRight: Boolean
+    ): UfldLaneDetector.LanePoints? {
+        if (pts == null || pts.size < 3) return null
+        val halfWidth = imgW * 0.45f / 2f
+        val shift = if (toRight) halfWidth else -halfWidth
+        val nx = FloatArray(pts.size) { i -> (pts.x[i] + shift).coerceIn(0f, imgW.toFloat()) }
+        return UfldLaneDetector.LanePoints(nx, pts.y.copyOf())
     }
 }

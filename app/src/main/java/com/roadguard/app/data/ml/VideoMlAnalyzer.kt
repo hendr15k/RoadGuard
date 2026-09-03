@@ -37,6 +37,8 @@ class VideoMlAnalyzer(
 
     private val laneDetector = LaneDetector(laneSensitivity)
     private var tfliteRunner: TfliteModelRunner? = null
+    private var ufldDetector: UfldLaneDetector? = null
+    private var ufldLoadAttempted = false
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -71,7 +73,7 @@ class VideoMlAnalyzer(
     private val detectorLock = Any()
 
     init {
-        // Only construct the runner here; loading maps the model and builds the
+        // Only construct the runners here; loading maps the model and builds the
         // native interpreter, which must not happen during composition.
         appContext?.let { ctx ->
             try {
@@ -79,10 +81,29 @@ class VideoMlAnalyzer(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+            try {
+                ufldDetector = UfldLaneDetector(ctx)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
     private val modelLock = Any()
+
+    private fun ensureUfldLoaded(): UfldLaneDetector? {
+        if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
+        synchronized(modelLock) {
+            if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
+            ufldLoadAttempted = true
+            try {
+                ufldDetector?.loadModel()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return ufldDetector?.takeIf { it.isLoaded() }
+    }
 
     private fun ensureModelLoaded() {
         if (modelLoadAttempted) return
@@ -114,7 +135,39 @@ class VideoMlAnalyzer(
         // ownership to its onComplete listener.
         var handedToMlKit = false
         try {
-            val swResult = laneDetector.detectLanes(bitmap)
+            // UFLD first: direct lane points instead of histogram hunting. Falls
+            // back to classic CV when no model is present or no ego pair is
+            // found; DeepLab stays as the last-resort drift signal.
+            //
+            // ORDER MATTERS: classic CV (LaneDetector.detectLanes, ~50-60 ms)
+            // must NOT run before UFLD on every frame. detectLanes() costs a
+            // full BEV warp + histogram pass even when its result is discarded
+            // — on the emulator that starved the UI thread and produced ANRs.
+            // Run UFLD first; classic CV only as fallback when UFLD misses.
+            val ufld = ensureUfldLoaded()
+            var ufldResult: UfldLaneDetector.UfldResult? = null
+            if (ufld != null) {
+                try {
+                    ufldResult = ufld.detect(bitmap)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    ufldResult = null
+                }
+            }
+            val ufldOk = ufldResult != null && (ufldResult.left != null || ufldResult.right != null)
+
+            // Lazy classic-CV fallback: only computed when UFLD has no ego
+            // pair. Held nullable so the log line and the fallback branch can
+            // share one invocation per frame.
+            var swResult: LaneDetector.LaneDetectionResult? = null
+            fun sw(): LaneDetector.LaneDetectionResult {
+                var r = swResult
+                if (r == null) {
+                    r = laneDetector.detectLanes(bitmap)
+                    swResult = r
+                }
+                return r
+            }
 
             var tfliteDriftL = false
             var tfliteDriftR = false
@@ -138,45 +191,83 @@ class VideoMlAnalyzer(
                 }
             }
 
-            val finalIsDriftingLeft = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
-            val finalIsDriftingRight = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
-            val finalConfidence = maxOf(swResult.confidence, tfliteConf)
-            val finalCenterOffset = if (swResult.confidence > 0.3f) swResult.centerOffset else tfliteCenterOffset
-
-            val leftMark = if (swResult.leftLane?.valid == true) "L" else "-"
-            val rightMark = if (swResult.rightLane?.valid == true) "R" else "-"
+            val finalIsDriftingLeft: Boolean
+            val finalIsDriftingRight: Boolean
+            val finalConfidence: Float
+            val finalCenterOffset: Float
+            val finalLaneWidth: Float
+            val leftMark: String
+            val rightMark: String
+            val leftCurve: com.roadguard.app.domain.model.LaneCurve
+            val rightCurve: com.roadguard.app.domain.model.LaneCurve
+            if (ufldOk) {
+                // UFLD won: fit curves through its points, derive offset/width
+                // from the fitted pair. Classic CV is skipped entirely.
+                val curves = ufldCurvesToDomain(ufldResult!!)
+                val ufldOff = ufldCenterOffset(ufldResult, bitmap.width)
+                val driftGate = 0.04f * (1.5f - laneSensitivity)
+                finalIsDriftingLeft = ufldOff < -bitmap.width * driftGate && ufldResult.confidence > 0.4f
+                finalIsDriftingRight = ufldOff > bitmap.width * driftGate && ufldResult.confidence > 0.4f
+                finalConfidence = ufldResult.confidence
+                finalCenterOffset = ufldOff
+                finalLaneWidth = ufldLaneWidth(ufldResult)
+                leftMark = if (ufldResult.left != null) "L" else "-"
+                rightMark = if (ufldResult.right != null) "R" else "-"
+                leftCurve = curves.first
+                rightCurve = curves.second
+            } else {
+                val cv = sw()
+                finalIsDriftingLeft = if (cv.confidence > 0.3f) cv.isDriftingLeft else tfliteDriftL
+                finalIsDriftingRight = if (cv.confidence > 0.3f) cv.isDriftingRight else tfliteDriftR
+                finalConfidence = maxOf(cv.confidence, tfliteConf)
+                finalCenterOffset = if (cv.confidence > 0.3f) cv.centerOffset else tfliteCenterOffset
+                finalLaneWidth = cv.laneWidth
+                leftMark = if (cv.leftLane?.valid == true) "L" else "-"
+                rightMark = if (cv.rightLane?.valid == true) "R" else "-"
+                leftCurve = cv.leftLane?.let { l ->
+                    com.roadguard.app.domain.model.LaneCurve(
+                        a = l.polyA, b = l.polyB, c = l.polyC,
+                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
+                    )
+                } ?: com.roadguard.app.domain.model.LaneCurve()
+                rightCurve = cv.rightLane?.let { l ->
+                    com.roadguard.app.domain.model.LaneCurve(
+                        a = l.polyA, b = l.polyB, c = l.polyC,
+                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
+                    )
+                } ?: com.roadguard.app.domain.model.LaneCurve()
+            }
+            // Log sw= lazily: evaluating it would run classic CV on every
+            // frame even when UFLD won (defeating the lazy fallback above).
+            // -1.00 marks "not computed" in the log.
+            val swConf = if (swResult != null) sw()?.confidence ?: -1f else -1f
             android.util.Log.d("LaneTracking",
                 "sw=%.2f tf=%.2f cf=%.2f dL=%b dR=%b lanes=%s offset=%.1f width=%.0f".format(
-                    swResult.confidence, tfliteConf, finalConfidence,
-                    finalIsDriftingLeft, finalIsDriftingRight, 
-                    leftMark + rightMark, finalCenterOffset, swResult.laneWidth
+                    swConf, tfliteConf, finalConfidence,
+                    finalIsDriftingLeft, finalIsDriftingRight,
+                    leftMark + rightMark, finalCenterOffset, finalLaneWidth
                 )
             )
 
+            val ufldActive = ufldOk && ufldResult != null
+            // imageWidth/Height for the overlay transform: UFLD path has no
+            // classic result, so fall back to the raw frame size.
+            val refW = swResult?.imageWidth ?: bitmap.width
+            val refH = swResult?.imageHeight ?: bitmap.height
             _laneInfo.value = LaneInfo(
                 isDriftingLeft = finalIsDriftingLeft,
                 isDriftingRight = finalIsDriftingRight,
                 confidence = finalConfidence,
                 centerOffset = finalCenterOffset,
-                laneWidth = swResult.laneWidth,
+                laneWidth = finalLaneWidth,
                 // smoothLane() returns a stale extrapolation with valid=false for a
                 // missed detection; reporting it as "visible" lied in the HUD.
-                leftLaneVisible = swResult.leftLane?.valid == true,
-                rightLaneVisible = swResult.rightLane?.valid == true,
-                leftCurve = swResult.leftLane?.let { l ->
-                    com.roadguard.app.domain.model.LaneCurve(
-                        a = l.polyA, b = l.polyB, c = l.polyC,
-                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
-                    )
-                } ?: com.roadguard.app.domain.model.LaneCurve(),
-                rightCurve = swResult.rightLane?.let { l ->
-                    com.roadguard.app.domain.model.LaneCurve(
-                        a = l.polyA, b = l.polyB, c = l.polyC,
-                        yStart = l.yStart, yEnd = l.yEnd, valid = l.valid
-                    )
-                } ?: com.roadguard.app.domain.model.LaneCurve(),
-                imageWidth = swResult.imageWidth,
-                imageHeight = swResult.imageHeight
+                leftLaneVisible = if (ufldActive) leftMark == "L" else sw()?.leftLane?.valid == true,
+                rightLaneVisible = if (ufldActive) rightMark == "R" else sw()?.rightLane?.valid == true,
+                leftCurve = leftCurve,
+                rightCurve = rightCurve,
+                imageWidth = refW,
+                imageHeight = refH
             )
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
@@ -281,6 +372,108 @@ class VideoMlAnalyzer(
         return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2f else sorted[mid]
     }
 
+    // === UFLD helpers: points -> domain curves / offset / width ===
+    // Mirror of MlDetectionAnalyzer: the video path consumes the same raw
+    // polylines but owns its own copy (no shared base class yet).
+
+    private fun fitQuadratic(
+        xs: FloatArray, ys: FloatArray
+    ): Triple<Float, Float, Float>? {
+        if (xs.size < 3 || xs.size != ys.size) return null
+        val n = xs.size
+        var sY = 0.0; var sY2 = 0.0; var sY3 = 0.0; var sY4 = 0.0
+        var sX = 0.0; var sXY = 0.0; var sXY2 = 0.0
+        for (i in 0 until n) {
+            val x = xs[i].toDouble(); val y = ys[i].toDouble()
+            val y2 = y * y
+            sY += y; sY2 += y2; sY3 += y2 * y; sY4 += y2 * y2
+            sX += x; sXY += x * y; sXY2 += x * y2
+        }
+        fun det3(m: Array<DoubleArray>): Double {
+            return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+                m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        }
+        val m = arrayOf(
+            doubleArrayOf(sY4, sY3, sY2),
+            doubleArrayOf(sY3, sY2, sY),
+            doubleArrayOf(sY2, sY, n.toDouble())
+        )
+        val d = det3(m)
+        if (kotlin.math.abs(d) < 1e-9) return null
+        val mx = arrayOf(
+            doubleArrayOf(sXY2, sY3, sY2),
+            doubleArrayOf(sXY, sY2, sY),
+            doubleArrayOf(sX, sY, n.toDouble())
+        )
+        val my = arrayOf(
+            doubleArrayOf(sY4, sXY2, sY2),
+            doubleArrayOf(sY3, sXY, sY),
+            doubleArrayOf(sY2, sX, n.toDouble())
+        )
+        val mz = arrayOf(
+            doubleArrayOf(sY4, sY3, sXY2),
+            doubleArrayOf(sY3, sY2, sXY),
+            doubleArrayOf(sY2, sY, sX)
+        )
+        val a = (det3(mx) / d).toFloat()
+        if (kotlin.math.abs(a) > 0.5f) return null
+        return Triple(a, (det3(my) / d).toFloat(), (det3(mz) / d).toFloat())
+    }
+
+    private fun ufldPointsToCurve(
+        pts: UfldLaneDetector.LanePoints?
+    ): com.roadguard.app.domain.model.LaneCurve {
+        if (pts == null || pts.size < 3) return com.roadguard.app.domain.model.LaneCurve()
+        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
+        var yMin = pts.y[0]; var yMax = pts.y[0]
+        for (y in pts.y) {
+            if (y < yMin) yMin = y
+            if (y > yMax) yMax = y
+        }
+        return com.roadguard.app.domain.model.LaneCurve(
+            a = abc.first, b = abc.second, c = abc.third,
+            yStart = yMin, yEnd = yMax, valid = true
+        )
+    }
+
+    private fun ufldCurvesToDomain(
+        res: UfldLaneDetector.UfldResult
+    ): Pair<com.roadguard.app.domain.model.LaneCurve, com.roadguard.app.domain.model.LaneCurve> {
+        return Pair(ufldPointsToCurve(res.left), ufldPointsToCurve(res.right))
+    }
+
+    private fun ufldLaneCenterX(pts: UfldLaneDetector.LanePoints?): Float? {
+        if (pts == null || pts.size == 0) return null
+        var maxY = Float.NEGATIVE_INFINITY
+        var xAtMaxY = 0f
+        for (i in 0 until pts.size) {
+            if (pts.y[i] > maxY) {
+                maxY = pts.y[i]
+                xAtMaxY = pts.x[i]
+            }
+        }
+        return xAtMaxY
+    }
+
+    private fun ufldCenterOffset(res: UfldLaneDetector.UfldResult, imgW: Int): Float {
+        val lx = ufldLaneCenterX(res.left)
+        val rx = ufldLaneCenterX(res.right)
+        val vehicleCenter = imgW * 0.5f
+        return when {
+            lx != null && rx != null -> vehicleCenter - (lx + rx) / 2f
+            lx != null -> vehicleCenter - lx - 150f
+            rx != null -> vehicleCenter - rx + 150f
+            else -> 0f
+        }
+    }
+
+    private fun ufldLaneWidth(res: UfldLaneDetector.UfldResult): Float {
+        val lx = ufldLaneCenterX(res.left) ?: return 0f
+        val rx = ufldLaneCenterX(res.right) ?: return 0f
+        return (rx - lx).coerceIn(80f, 500f)
+    }
+
     private fun intersectionOverUnion(a: Rect, b: Rect): Float {
         val left = maxOf(a.left, b.left)
         val top = maxOf(a.top, b.top)
@@ -373,6 +566,11 @@ class VideoMlAnalyzer(
             }
             try {
                 tfliteRunner?.close()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                ufldDetector?.close()
             } catch (e: Exception) {
                 e.printStackTrace()
             }

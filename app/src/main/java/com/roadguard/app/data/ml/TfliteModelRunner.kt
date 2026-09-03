@@ -6,8 +6,10 @@ import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
 import java.io.File
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.channels.FileChannel
 
 class TfliteModelRunner(private val context: Context) {
 
@@ -37,7 +39,11 @@ class TfliteModelRunner(private val context: Context) {
             val modelBuffer: ByteBuffer = if (modelFile.exists()) {
                 // Interpreter rejects heap buffers — it requires a
                 // MappedByteBuffer or a direct ByteBuffer.
-                FileUtil.loadMappedFile(context, modelFile.absolutePath)
+                // NOTE: FileUtil.loadMappedFile(context, path) resolves `path`
+                // as an ASSET name, never pass an absolute file path to it.
+                FileInputStream(modelFile).channel.use { ch ->
+                    ch.map(FileChannel.MapMode.READ_ONLY, 0, modelFile.length())
+                }
             } else {
                 try {
                     FileUtil.loadMappedFile(context, modelName)
