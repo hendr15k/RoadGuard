@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import com.roadguard.app.domain.model.AlertPolicy
 import com.roadguard.app.domain.model.LaneCurve
 import com.roadguard.app.domain.model.LaneInfo
 import com.roadguard.app.ui.theme.DangerRed
@@ -113,7 +114,7 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean) {
         )
     }
 
-        if (laneInfo.confidence < 0.4f && (hasLeft || hasRight)) {
+        if (laneInfo.confidence < AlertPolicy.MIN_LANE_CONFIDENCE && (hasLeft || hasRight)) {
             drawUncertaintyIndicator(canvasW, canvasH, baseColor)
         }
     }

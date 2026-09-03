@@ -73,7 +73,7 @@ class AlertPolicy {
         distance: VehicleDistance?,
         nowMs: Long
     ): AlertEvaluation {
-        val laneHazard = laneHazard(settings, laneInfo)
+        val laneHazard = laneHazard(settings, laneInfo, nowMs)
         val collisionHazard = collisionHazard(settings, distance, nowMs)
         val hazard = collisionHazard ?: laneHazard
 
@@ -149,9 +149,12 @@ class AlertPolicy {
         return WarningType.ForwardCollision
     }
 
-    private fun laneHazard(settings: AppSettings, laneInfo: LaneInfo?): WarningType? {
+    private fun laneHazard(settings: AppSettings, laneInfo: LaneInfo?, nowMs: Long): WarningType? {
         if (!settings.laneWarningEnabled) return null
         if (laneInfo == null || laneInfo.confidence < MIN_LANE_CONFIDENCE) return null
+        // Mirror of collisionHazard: a lane sample computed from an old frame
+        // (paused video, stalled pipeline) must not hold an alarm forever.
+        if (nowMs - laneInfo.timestamp > STALE_MS) return null
         return when {
             laneInfo.isDriftingLeft -> WarningType.LaneDepartureLeft
             laneInfo.isDriftingRight -> WarningType.LaneDepartureRight

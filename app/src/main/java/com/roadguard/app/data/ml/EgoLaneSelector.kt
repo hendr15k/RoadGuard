@@ -34,7 +34,8 @@ class EgoLaneSelector {
         if (width < frameWidth * 0.10f || width > frameWidth * 0.75f) return null
         val center = (left.xBottom + right.xBottom) / 2f
         val centerPenalty = kotlin.math.abs(center - midX) / (frameWidth * 0.5f)
-        val widthPenalty = kotlin.math.abs(width - expWidth) / expWidth
+        val safeExpWidth = if (expWidth > 1f) expWidth else frameWidth * 0.35f
+        val widthPenalty = kotlin.math.abs(width - safeExpWidth) / safeExpWidth
         var score = -(centerPenalty * 1.5f + widthPenalty)
         if (prevLeftX > 0f) score -= kotlin.math.abs(left.xBottom - prevLeftX) / (frameWidth * 0.5f) * 0.5f
         if (prevRightX > 0f) score -= kotlin.math.abs(right.xBottom - prevRightX) / (frameWidth * 0.5f) * 0.5f

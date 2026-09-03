@@ -120,7 +120,8 @@ class UfldLaneDetector(private val context: Context) {
                 } catch (e: Throwable) {
                     try { probe.close() } catch (_: Exception) {}
                     try { gpu.close() } catch (_: Exception) {}
-                    options.addDelegate(null)
+                    // NOTE: `options` is discarded here (finalOptions is built
+                    // fresh below) — no need to detach the failed delegate.
                     throw e
                 }
             } catch (e: Throwable) {
@@ -208,6 +209,7 @@ class UfldLaneDetector(private val context: Context) {
         cachedOutput = null
     }
 
+    @Synchronized
     fun reset() {
         emaState.clear()
         emaFrame.clear()

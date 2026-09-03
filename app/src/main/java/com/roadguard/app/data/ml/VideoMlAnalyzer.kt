@@ -38,7 +38,11 @@ class VideoMlAnalyzer(
     private val laneDetector = LaneDetector(laneSensitivity)
     private var tfliteRunner: TfliteModelRunner? = null
     private var ufldDetector: UfldLaneDetector? = null
-    private var ufldLoadAttempted = false
+    private var ufldRetryAtMs = 0L
+    private companion object {
+        /** Minimum gap between UFLD (re-)load attempts. */
+        private const val UFLD_RETRY_COOLDOWN_MS = 30_000L
+    }
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -92,10 +96,15 @@ class VideoMlAnalyzer(
     private val modelLock = Any()
 
     private fun ensureUfldLoaded(): UfldLaneDetector? {
-        if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
+        ufldDetector?.takeIf { it.isLoaded() }?.let { return it }
         synchronized(modelLock) {
-            if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
-            ufldLoadAttempted = true
+            ufldDetector?.takeIf { it.isLoaded() }?.let { return it }
+            // Retry with cooldown instead of a one-shot flag: a model
+            // downloaded later (or a transient load failure) previously
+            // needed a full process restart to take effect.
+            val now = System.currentTimeMillis()
+            if (now - ufldRetryAtMs < UFLD_RETRY_COOLDOWN_MS) return null
+            ufldRetryAtMs = now
             try {
                 ufldDetector?.loadModel()
             } catch (e: Exception) {
@@ -302,7 +311,7 @@ class VideoMlAnalyzer(
             val inputImage = InputImage.fromBitmap(bitmap, 0)
             synchronized(detectorLock) {
                 if (closed) return
-                detectVehicles(inputImage, bitmap, height)
+                detectVehicles(inputImage, bitmap, height, bitmap.width)
                 handedToMlKit = true
             }
         } catch (e: Exception) {
@@ -312,15 +321,24 @@ class VideoMlAnalyzer(
         }
     }
 
-    private fun detectVehicles(inputImage: InputImage, bitmapToRecycle: Bitmap, imageHeight: Int) {
+    private fun detectVehicles(inputImage: InputImage, bitmapToRecycle: Bitmap, imageHeight: Int, imageWidth: Int) {
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
-                if (closed) return@addOnSuccessListener
-                processVehicleResult(detectedObjects, imageHeight)
+                // Serialize with close() and other in-flight callbacks: frames
+                // can overlap (throttle < ML Kit latency) and the tracking
+                // state below is mutated from callback threads.
+                synchronized(detectorLock) {
+                    if (closed) return@addOnSuccessListener
+                    processVehicleResult(detectedObjects, imageHeight, imageWidth)
+                }
             }
             .addOnFailureListener {
-                if (closed) return@addOnFailureListener
-                _vehicleDistance.value = null
+                // closed ist @Volatile, der Read unter Lock serialisiert
+                // zusätzlich gegen einen parallel laufenden Success-Callback.
+                synchronized(detectorLock) {
+                    if (closed) return@addOnFailureListener
+                    _vehicleDistance.value = null
+                }
             }
             .addOnCompleteListener {
                 try {
@@ -335,7 +353,8 @@ class VideoMlAnalyzer(
 
     private fun processVehicleResult(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
-        imageHeight: Int
+        imageHeight: Int,
+        imageWidth: Int
     ) {
         // Delegates label- vs geometry-fallback to the JVM-tested VehiclePipeline.
         // The base ML Kit model never emits Vehicle/Car labels (only
@@ -346,7 +365,7 @@ class VideoMlAnalyzer(
                 obj.labels.map { VehiclePipeline.Label(it.text, it.confidence) }
             )
         }
-        val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight)
+        val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight, imageWidth)
         var closestVehicle: DetectedVehicle? = null
         if (candidate != null) {
             val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight)
