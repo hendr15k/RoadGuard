@@ -347,6 +347,16 @@ class TfliteModelRunner(private val context: Context) {
         }
 
         val freeRatio = freeCount.toFloat() / totalCount
+        // A healthy segmentation always labels vehicles, signs, sky and
+        // vegetation as non-background. freeRatio == 1.0 means the model
+        // collapsed (e.g. domain mismatch: PASCAL-VOC classes on dashcam
+        // footage) and the "free surface" is the whole frame — its centroid
+        // is then the image center and any drift signal is noise. Verified on
+        // real dashcam clips: freeRatio was exactly 1.00 on all scenes, so
+        // this path must report unusable instead of a confident offset.
+        if (freeRatio >= 0.995f) {
+            return LaneDetector.LaneDetectionResult(null, null, 0f, false, false, 0.05f, 0f)
+        }
         val freeCentroidPx = (sumFreeX / freeCount).toFloat() * imgWidth / segW
         val vehicleCenter = imgWidth * 0.5f
         val centerOffset = vehicleCenter - freeCentroidPx

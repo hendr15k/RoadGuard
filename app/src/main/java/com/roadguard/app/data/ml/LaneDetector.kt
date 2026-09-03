@@ -172,6 +172,25 @@ class LaneDetector(
     private var leftPrimed = false
     private var rightPrimed = false
 
+    /**
+     * Ego-lane width prior in working (BEV-ish) coordinates: an online median
+     * of recently accepted pair widths. Median is robust to single wrong
+     * pairs; the default stays until consecutive consistent widths confirm a
+     * real change. Prevents one early wrong pair from biasing selection.
+     */
+    private var expectedBevWidth: Float = 0f
+    private var lastChosenLeftX: Float = 0f
+    private var lastChosenRightX: Float = 0f
+    /** Shared, unit-tested scoring + width-prior state. */
+    private val egoLaneSelector = EgoLaneSelector()
+
+    /** Raw (unsmoothed) lane candidate: pure measurement, no filter state. */
+    private data class RawLane(
+        val a: Float, val b: Float, val c: Float,
+        val yStart: Float, val yEnd: Float,
+        val xTop: Float, val xBottom: Float
+    )
+
     fun detectLanes(bitmap: Bitmap): LaneDetectionResult {
         frameCounter++
         val startTime = System.currentTimeMillis()
@@ -263,9 +282,29 @@ class LaneDetector(
         
         val roiTop = (birdH * 0.15).toInt()
         val roiBottom = birdH
-        
-        val leftLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = true)
-        val rightLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = false)
+
+        // Ego-lane pair selection: evaluate all left/right candidates and pick
+        // the pair straddling the vehicle center with plausible width. Falls
+        // back to single-side detection when no pair passes validation.
+        val pair = detectEgoLanePair(edges, roadMask, birdW, birdH, roiTop, roiBottom)
+        val leftLane: LaneLine?
+        val rightLane: LaneLine?
+        if (pair != null) {
+            val (rawL, rawR) = pair
+            lastChosenLeftX = rawL.xBottom
+            lastChosenRightX = rawR.xBottom
+            val abcL = applyKalman(rawL, isLeft = true, birdW)
+            val abcR = applyKalman(rawR, isLeft = false, birdW)
+            leftLane = buildLaneLine(rawL, abcL, birdW)
+            rightLane = buildLaneLine(rawR, abcR, birdW)
+            val pairWidth = rawR.xBottom - rawL.xBottom
+            if (pairWidth in birdW * 0.10f..birdW * 0.75f) {
+                observeBevWidth(pairWidth, birdW)
+            }
+        } else {
+            leftLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = true)
+            rightLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = false)
+        }
 
         val leftValid = leftLane?.valid == true
         val rightValid = rightLane?.valid == true
@@ -387,9 +426,26 @@ class LaneDetector(
         
         val roiTop = (birdH * 0.15).toInt()
         val roiBottom = birdH
-        
-        val leftLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = true)
-        val rightLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = false)
+
+        val pair = detectEgoLanePair(edges, roadMask, birdW, birdH, roiTop, roiBottom)
+        val leftLane: LaneLine?
+        val rightLane: LaneLine?
+        if (pair != null) {
+            val (rawL, rawR) = pair
+            lastChosenLeftX = rawL.xBottom
+            lastChosenRightX = rawR.xBottom
+            val abcL = applyKalman(rawL, isLeft = true, birdW)
+            val abcR = applyKalman(rawR, isLeft = false, birdW)
+            leftLane = buildLaneLine(rawL, abcL, birdW)
+            rightLane = buildLaneLine(rawR, abcR, birdW)
+            val pairWidth = rawR.xBottom - rawL.xBottom
+            if (pairWidth in birdW * 0.10f..birdW * 0.75f) {
+                observeBevWidth(pairWidth, birdW)
+            }
+        } else {
+            leftLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = true)
+            rightLane = detectLaneWithHough(edges, roadMask, birdW, birdH, roiTop, roiBottom, isLeft = false)
+        }
 
         val leftValid = leftLane?.valid == true
         val rightValid = rightLane?.valid == true
@@ -449,6 +505,10 @@ class LaneDetector(
         expectedRightX = 0f
         expectedLeftXBev = 0f
         expectedRightXBev = 0f
+        expectedBevWidth = 0f
+        egoLaneSelector.reset()
+        lastChosenLeftX = 0f
+        lastChosenRightX = 0f
         leftXHistory.clear()
         rightXHistory.clear()
         lastLeftValid = false
@@ -880,6 +940,238 @@ class LaneDetector(
         return brightness > thresh
     }
 
+    // === Ego-lane pair selection (multi-candidate) ===
+    // The old code took the single strongest histogram peak per half-frame.
+    // On multi-lane roads that is the OUTER marking (adjacent lane / shoulder
+    // edge), so the overlay spanned two lanes and drift warnings fired on
+    // straight driving. Now: collect up to 4 local-maximum peaks per side,
+    // trace each without touching filter state, and pick the pair straddling
+    // the vehicle center with plausible width.
+
+    private fun computeLaneHistogram(
+        edges: IntArray, mask: IntArray, w: Int, roiTop: Int, roiBottom: Int
+    ): IntArray {
+        val histogram = IntArray(w)
+        val windowHeight = max((roiBottom - roiTop) / LANE_WINDOWS, 1)
+        val histStart = (roiBottom - windowHeight * 3).coerceAtLeast(roiTop)
+        for (y in histStart until roiBottom) {
+            val row = y * w
+            for (x in 0 until w) {
+                val idx = row + x
+                if (mask[idx] > 0) histogram[x] += 3
+                else if (edges[idx] > 0) histogram[x] += 1
+            }
+        }
+        return histogram
+    }
+
+    private fun findLanePeaks(
+        histogram: IntArray, searchStart: Int, searchEnd: Int,
+        windowWidth: Int, seeds: FloatArray = floatArrayOf()
+    ): List<Int> {
+        val sums = IntArray(histogram.size)
+        var best = 0
+        val last = (searchEnd - windowWidth).coerceAtMost(histogram.size - windowWidth - 1)
+        for (i in searchStart..last.coerceAtLeast(searchStart)) {
+            var sum = 0
+            for (j in 0 until windowWidth) sum += histogram[i + j]
+            sums[i] = sum
+            if (sum > best) best = sum
+        }
+        val floor = max(best * 0.25f, 12f)
+        val local = ArrayList<Int>()
+        for (i in searchStart..last.coerceAtLeast(searchStart)) {
+            val s = sums[i].toFloat()
+            if (s < floor) continue
+            val prev = if (i > 0) sums[i - 1] else -1
+            val next = if (i + 1 < sums.size) sums[i + 1] else -1
+            if (sums[i] >= prev && sums[i] >= next) local.add(i)
+        }
+        local.sortByDescending { sums[it] }
+        val picked = ArrayList<Int>()
+        for (i in local) {
+            val px = i + windowWidth / 2
+            if (picked.all { abs(px - it) > windowWidth / 2 }) picked.add(px)
+            if (picked.size >= 4) break
+        }
+        for (seed in seeds) {
+            if (seed > 0f && seed >= searchStart && seed < searchEnd &&
+                picked.all { abs(seed - it) > windowWidth / 4 }) {
+                picked.add(seed.toInt())
+            }
+        }
+        return picked
+    }
+
+    /**
+     * Trace + fit for ONE peak candidate. Pure measurement: no Kalman update,
+     * no prior mutation — rejected candidates must leave no state behind.
+     * Narrow fixed window (0.75x) with mask-weighted centroid: the old growing
+     * margin (up to 2x) let the centroid get pulled onto the neighbouring
+     * lane's marking on dashed/gapped lines.
+     */
+    private fun traceRawLane(
+        edges: IntArray, mask: IntArray, w: Int, h: Int,
+        roiTop: Int, roiBottom: Int, peakX: Int, isLeft: Boolean
+    ): RawLane? {
+        val windowWidth = w / 8
+        val midX = w / 2
+        val windowHeight = max((roiBottom - roiTop) / LANE_WINDOWS, 1)
+        var currentX = peakX.toFloat()
+        val points = ArrayList<Pair<Int, Int>>(LANE_WINDOWS)
+        val margin = max(8, (windowWidth * 0.75f).toInt())
+        for (win in 0 until LANE_WINDOWS) {
+            val winYLow = roiBottom - (win + 1) * windowHeight
+            val winYHigh = roiBottom - win * windowHeight
+            val winXLow = (currentX - margin).toInt().coerceIn(0, w - 1)
+            val winXHigh = (currentX + margin).toInt().coerceIn(1, w)
+            var sumW = 0.0
+            var sumXW = 0.0
+            var sumY = 0
+            var count = 0
+            for (y in winYLow until winYHigh) {
+                val row = y * w
+                for (x in winXLow until winXHigh) {
+                    val idx = row + x
+                    val weight = when {
+                        mask[idx] > 0 -> 3
+                        edges[idx] > 0 -> 1
+                        else -> 0
+                    }
+                    if (weight > 0) {
+                        sumW += weight
+                        sumXW += x * weight
+                        sumY += y
+                        count++
+                    }
+                }
+            }
+            if (count > 8) {
+                val newX = (sumXW / sumW).toFloat()
+                val newY = (sumY.toFloat() / count).toInt()
+                if (abs(newX - currentX) < windowWidth * 0.35f || points.isEmpty()) {
+                    currentX = currentX * 0.3f + newX * 0.7f
+                    points.add(Pair(currentX.toInt(), newY))
+                }
+            }
+        }
+        if (points.size < 4) return null
+        val (aBev, bBev, cBev) = fitPolynomialRansac(points) ?: return null
+        val perspectiveSamples = sampleAndProjectToPerspective(
+            aBev, bBev, cBev, w, h, yStartF = roiTop.toFloat(), yEndF = roiBottom.toFloat()
+        )
+        if (perspectiveSamples.size < 3) return null
+        val (aRaw, bRaw, cRaw) = if (perspectiveSamples.size >= 5) {
+            solvePolyFromFloat(perspectiveSamples) ?: fitLinear(perspectiveSamples) ?: return null
+        } else {
+            fitLinear(perspectiveSamples) ?: return null
+        }
+        val yStartF = perspectiveSamples.first().second.coerceIn(0f, h.toFloat())
+        val yEndF = perspectiveSamples.last().second.coerceIn(0f, h.toFloat())
+        if (yEndF - yStartF < 2f) return null
+        fun polyX(y: Float): Float = aRaw * y * y + bRaw * y + cRaw
+        val xAtTop = polyX(yStartF).coerceIn(0f, w.toFloat())
+        val xAtBottom = polyX(yEndF).coerceIn(0f, w.toFloat())
+        val onSide = if (isLeft) {
+            xAtBottom < midX - windowWidth / 4 && xAtTop < midX
+        } else {
+            xAtBottom > midX + windowWidth / 4 && xAtTop > midX
+        }
+        if (!onSide) return null
+        return RawLane(aRaw, bRaw, cRaw, yStartF, yEndF, xAtTop, xAtBottom)
+    }
+
+    /**
+     * Pick the ego-lane pair: all left/right candidates traced, then the pair
+     * straddling the center with plausible width wins. Edge-glued traces
+     * (ran off to the image border) are excluded first. Continuity with the
+     * previous frame breaks ties. Scoring lives in [EgoLaneSelector] (unit
+     * tested); this only adapts RawLane to its Candidate type.
+     */
+    private fun detectEgoLanePair(
+        edges: IntArray, mask: IntArray, w: Int, h: Int,
+        roiTop: Int, roiBottom: Int
+    ): Pair<RawLane, RawLane>? {
+        val histogram = computeLaneHistogram(edges, mask, w, roiTop, roiBottom)
+        val midX = w / 2
+        val windowWidth = w / 8
+        val leftPeaks = findLanePeaks(histogram, 0, midX, windowWidth, floatArrayOf(expectedLeftXBev))
+        val rightPeaks = findLanePeaks(histogram, midX, w, windowWidth, floatArrayOf(expectedRightXBev))
+        val candsL = leftPeaks.mapNotNull { p ->
+            traceRawLane(edges, mask, w, h, roiTop, roiBottom, p, isLeft = true)
+        }
+        val candsR = rightPeaks.mapNotNull { p ->
+            traceRawLane(edges, mask, w, h, roiTop, roiBottom, p, isLeft = false)
+        }
+        if (candsL.isEmpty() || candsR.isEmpty()) return null
+        fun glued(r: RawLane) = r.xBottom <= w * 0.02f || r.xBottom >= w * 0.98f
+        val poolL = candsL.filter { !glued(it) }.ifEmpty { candsL }
+            .map { EgoLaneSelector.Candidate(it.xTop, it.xBottom) to it }
+        val poolR = candsR.filter { !glued(it) }.ifEmpty { candsR }
+            .map { EgoLaneSelector.Candidate(it.xTop, it.xBottom) to it }
+        val expW = if (expectedBevWidth > 0f) expectedBevWidth else w * 0.35f
+        var best: Pair<RawLane, RawLane>? = null
+        var bestScore = Float.NEGATIVE_INFINITY
+        for ((cl, rl) in poolL) {
+            for ((cr, rr) in poolR) {
+                val score = egoLaneSelector.scorePair(
+                    cl, cr, w, midX.toFloat(), expW, lastChosenLeftX, lastChosenRightX
+                ) ?: continue
+                if (score > bestScore) {
+                    bestScore = score
+                    best = Pair(rl, rr)
+                }
+            }
+        }
+        return best
+    }
+
+    /**
+     * Kalman update with jump detection: a measurement the tracker could never
+     * drift to in one frame is a DIFFERENT marking (lane change / corrected
+     * candidate) — re-prime instead of blending two lanes into a phantom
+     * middle line. This was the main false-drift source: the old filter
+     * dragged a stale outer-lane prior across 10+ frames.
+     */
+    private fun applyKalman(raw: RawLane, isLeft: Boolean, w: Int): Triple<Float, Float, Float> {
+        val kfA = if (isLeft) leftCoeffA else rightCoeffA
+        val kfB = if (isLeft) leftCoeffB else rightCoeffB
+        val kfC = if (isLeft) leftCoeffC else rightCoeffC
+        val primed = if (isLeft) leftPrimed else rightPrimed
+        val jumpThreshold = w / 8 * 0.75f
+        if (!primed || abs(raw.c - kfC.value) > jumpThreshold) {
+            kfA.reset(raw.a); kfB.reset(raw.b); kfC.reset(raw.c)
+            if (isLeft) leftPrimed = true else rightPrimed = true
+            if (leftPrimed && rightPrimed) kalmanPrimed = true
+            return Triple(raw.a, raw.b, raw.c)
+        }
+        return Triple(kfA.update(raw.a), kfB.update(raw.b), kfC.update(raw.c))
+    }
+
+    private fun buildLaneLine(raw: RawLane, abc: Triple<Float, Float, Float>, w: Int): LaneLine {
+        val (a, b, c) = abc
+        val xAtTop = (a * raw.yStart * raw.yStart + b * raw.yStart + c).coerceIn(0f, w.toFloat())
+        val xAtBottom = (a * raw.yEnd * raw.yEnd + b * raw.yEnd + c).coerceIn(0f, w.toFloat())
+        val dx = xAtBottom - xAtTop
+        val dy = raw.yEnd - raw.yStart
+        val angle = atan2(dy.toDouble(), dx.toDouble()).toFloat() * 180f / kotlin.math.PI.toFloat()
+        val length = sqrt(dx * dx + dy * dy)
+        return LaneLine(
+            x1 = xAtTop, y1 = raw.yStart,
+            x2 = xAtBottom, y2 = raw.yEnd,
+            angle = angle, length = length,
+            curvature = 2f * a, valid = true,
+            polyA = a, polyB = b, polyC = c,
+            yStart = raw.yStart, yEnd = raw.yEnd
+        )
+    }
+
+    private fun observeBevWidth(pairWidth: Float, w: Int) {
+        // Delegates to the unit-tested median logic; only mirrors the result
+        // into the detector's own prior field.
+        expectedBevWidth = egoLaneSelector.observeWidth(pairWidth, w)
+    }
+
     private fun detectLaneWithHough(
         edges: IntArray,
         mask: IntArray,
@@ -937,18 +1229,28 @@ class LaneDetector(
             val winYLow = roiBottom - (win + 1) * windowHeight
             val winYHigh = roiBottom - win * windowHeight
 
-            val margin = (windowWidth * (1.0f + win * 0.1f)).toInt().coerceIn(windowWidth / 2, windowWidth * 2)
+            // Narrow fixed window with mask-weighted centroid (same as the
+            // multi-candidate path): the old growing margin (up to 2x) let the
+            // centroid get pulled onto the neighbouring lane's marking.
+            val margin = max(8, (windowWidth * 0.75f).toInt())
             val winXLow = (currentX - margin).toInt().coerceIn(0, w - 1)
             val winXHigh = (currentX + margin).toInt().coerceIn(1, w)
 
-            var sumX = 0
+            var sumW = 0.0
+            var sumXW = 0.0
             var sumY = 0
             var count = 0
 
             for (y in winYLow until winYHigh) {
                 for (x in winXLow until winXHigh) {
-                    if (mask[y * w + x] > 0 || edges[y * w + x] > 0) {
-                        sumX += x
+                    val weight = when {
+                        mask[y * w + x] > 0 -> 3
+                        edges[y * w + x] > 0 -> 1
+                        else -> 0
+                    }
+                    if (weight > 0) {
+                        sumW += weight
+                        sumXW += x * weight
                         sumY += y
                         count++
                     }
@@ -956,13 +1258,13 @@ class LaneDetector(
             }
 
             if (count > 8) {
-                val newX = sumX.toFloat() / count
-                val newY = sumY.toFloat() / count
+                val newX = (sumXW / sumW).toFloat()
+                val newY = (sumY.toFloat() / count).toInt()
 
-                val maxJump = windowWidth * 0.7f
+                val maxJump = windowWidth * 0.35f
                 if (abs(newX - currentX) < maxJump || points.isEmpty()) {
                     currentX = currentX * 0.3f + newX * 0.7f
-                    points.add(Pair(currentX.toInt(), newY.toInt()))
+                    points.add(Pair(currentX.toInt(), newY))
                 }
             }
         }
@@ -1397,8 +1699,12 @@ class LaneDetector(
         if (previous == null) return current
 
         val baseAlpha = 0.7f
-        val y1 = current.y1 * baseAlpha + previous.y1 * (1 - baseAlpha)
-        val y2 = current.y2 * baseAlpha + previous.y2 * (1 - baseAlpha)
+        // Anchor the span to the CURRENT measurement: the old code blended y1/y2
+        // across frames, so a short curve evaluated at a stale longer span
+        // extrapolated x = a·y²+b·y+c far off-frame (±1000px+) and the HUD /
+        // offset followed the extrapolation instead of the visible marking.
+        val y1 = current.y1
+        val y2 = current.y2
 
         // Smooth the fitted curve itself, then derive the endpoints from that one
         // polynomial. Smoothing endpoints and coefficients separately (as before)
