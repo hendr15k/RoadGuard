@@ -12,23 +12,16 @@ class ModelDownloader(private val context: Context) {
 
     companion object {
         const val MODEL_DIR = "roadguard_models"
-        const val CURRENT_MODEL_FILE = "lane_model.tflite"
+        const val CURRENT_MODEL_FILE = "ufld_tusimple_float16.tflite"
 
+        // Only source left: UFLD updates without reinstall. The model ships
+        // bundled in assets since the model swap; this is the update channel.
+        // (DeepLab/MobileNet entries removed with the old model.)
         val modelSources = listOf(
             ModelSource(
                 name = "UFLD TuSimple Lane Detection (primary)",
                 url = "https://github.com/hendr15k/RoadGuard/releases/download/v1.0.50-models/ufld_tusimple_float16.tflite",
                 description = "Ultra-Fast-Lane-Detection, 800x288, up to 4 lanes — primary lane source"
-            ),
-            ModelSource(
-                name = "Ultra-Fast-Lane-Detection (TuSimple)",
-                url = "https://storage.googleapis.com/download.tensorflow.org/models/tflite/gpu/deeplabv3_257_mv_gpu.tflite",
-                description = "DeepLab v3 segmentation model for road understanding"
-            ),
-            ModelSource(
-                name = "MobileNetV2 SSD Vehicle Detection",
-                url = "https://storage.googleapis.com/download.tensorflow.org/models/tflite/gpu/mobilenet_v2_ssd_1.0_fpn_2x_256_quantized_edgetpu.tflite",
-                description = "Lightweight vehicle detection model"
             )
         )
     }

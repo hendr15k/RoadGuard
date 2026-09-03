@@ -81,17 +81,27 @@ class UfldLaneDetector(private val context: Context) {
     @Synchronized
     fun loadModel(fileName: String = MODEL_FILE) {
         try {
-            val modelFile = File(File(context.filesDir, ModelDownloader.MODEL_DIR), fileName)
-            if (!modelFile.exists()) {
-                android.util.Log.w("UfldLaneDetector", "model missing: ${modelFile.absolutePath}")
-                return
+            // Bundled asset first (shipped in the APK since the model swap),
+            // downloaded file as fallback for updates without reinstall.
+            val assetBuffer: MappedByteBuffer? = try {
+                org.tensorflow.lite.support.common.FileUtil.loadMappedFile(context, fileName)
+            } catch (e: Exception) {
+                android.util.Log.i("UfldLaneDetector", "no bundled asset, trying download dir")
+                null
             }
-            android.util.Log.i("UfldLaneDetector", "loading ${modelFile.absolutePath} (${modelFile.length()} bytes)")
-            // NOTE: FileUtil.loadMappedFile(context, path) treats `path` as an
-            // ASSET name (AssetManager.openFd) — never pass an absolute file
-            // path to it. Map the file directly instead.
-            val buffer: MappedByteBuffer = FileInputStream(modelFile).channel.use { ch ->
-                ch.map(FileChannel.MapMode.READ_ONLY, 0, modelFile.length())
+            val buffer: MappedByteBuffer = assetBuffer ?: run {
+                val modelFile = File(File(context.filesDir, ModelDownloader.MODEL_DIR), fileName)
+                if (!modelFile.exists()) {
+                    android.util.Log.w("UfldLaneDetector", "model missing")
+                    return
+                }
+                android.util.Log.i("UfldLaneDetector", "loading download (${modelFile.length()} bytes)")
+                // NOTE: FileUtil.loadMappedFile(context, path) treats `path` as an
+                // ASSET name (AssetManager.openFd) — never pass an absolute file
+                // path to it. Map the file directly instead.
+                FileInputStream(modelFile).channel.use { ch ->
+                    ch.map(FileChannel.MapMode.READ_ONLY, 0, modelFile.length())
+                }
             }
             closeLocked()
             // float16-quant UFLD: GPU first (Adreno/Mali handle fp16 well),

@@ -13,8 +13,8 @@ android {
         applicationId = "com.roadguard.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "v1.0.53"
+        versionCode = 14
+        versionName = "v1.0.54"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -49,6 +49,31 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    // .tflite must stay uncompressed: FileUtil.loadMappedFile needs
+    // AssetManager.openFd, which fails on compressed assets.
+    aaptOptions {
+        noCompress += "tflite"
+    }
+}
+
+// UFLD lane model (~117 MB) ships inside the APK but must not live in git
+// (GitHub blocks files >100 MB, no LFS here). The canonical copy is the
+// release asset below; this task fetches it into assets/ before the build
+// when missing. Local builds and CI both get a bundled model, the repo
+// stays source-only (see .gitignore).
+val ufldModelFile = layout.projectDirectory.file("src/main/assets/ufld_tusimple_float16.tflite")
+val downloadUfldModel by tasks.registering(Exec::class) {
+    description = "Fetch the bundled UFLD model (skipped when present)"
+    commandLine(
+        "sh", "-c",
+        "if [ ! -f src/main/assets/ufld_tusimple_float16.tflite ]; then " +
+            "curl -sSL -o src/main/assets/ufld_tusimple_float16.tflite " +
+            "https://github.com/hendr15k/RoadGuard/releases/download/v1.0.50-models/ufld_tusimple_float16.tflite; fi"
+    )
+    outputs.file(ufldModelFile)
+}
+tasks.matching { it.name.startsWith("pre") && it.name.endsWith("Build") }.configureEach {
+    dependsOn(downloadUfldModel)
 }
 
 dependencies {
