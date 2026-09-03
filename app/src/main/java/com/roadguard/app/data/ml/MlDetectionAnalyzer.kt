@@ -41,6 +41,8 @@ class MlDetectionAnalyzer(
 
     private val laneDetector = LaneDetector(laneSensitivity)
     private var tfliteRunner: TfliteModelRunner? = null
+    private var ufldDetector: UfldLaneDetector? = null
+    private var ufldLoadAttempted = false
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -84,11 +86,16 @@ class MlDetectionAnalyzer(
     private var modelLoadAttempted = false
 
     init {
-        // Only construct the runner here. Mapping a ~2.8 MB model and building the
-        // native interpreter belongs on the analyzer thread, not in composition.
+        // Only construct the runners here. Mapping models and building the
+        // native interpreters belongs on the analyzer thread, not in composition.
         appContext?.let { ctx ->
             try {
                 tfliteRunner = TfliteModelRunner(ctx)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                ufldDetector = UfldLaneDetector(ctx)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -96,6 +103,20 @@ class MlDetectionAnalyzer(
     }
 
     private val modelLock = Any()
+
+    private fun ensureUfldLoaded(): UfldLaneDetector? {
+        if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
+        synchronized(modelLock) {
+            if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
+            ufldLoadAttempted = true
+            try {
+                ufldDetector?.loadModel()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return ufldDetector?.takeIf { it.isLoaded() }
+    }
 
     private fun ensureModelLoaded() {
         if (modelLoadAttempted) return
@@ -197,6 +218,32 @@ class MlDetectionAnalyzer(
             val uprightWidth = if (uprightLandscape) imageProxy.width else imageProxy.height
             val uprightHeight = if (uprightLandscape) imageProxy.height else imageProxy.width
 
+            // UFLD first: direct lane points instead of histogram hunting. Falls
+            // back to classic CV when no model is downloaded or no ego pair is
+            // found; DeepLab stays as the last-resort drift signal.
+            val ufld = ensureUfldLoaded()
+            var ufldResult: UfldLaneDetector.UfldResult? = null
+            if (ufld != null) {
+                try {
+                    val uprightBitmap = yuvToUprightBitmap(
+                        yBuffer, yPlane.rowStride, yPlane.pixelStride,
+                        uBuffer, uPlane.rowStride, uPlane.pixelStride,
+                        vBuffer, vPlane.rowStride, vPlane.pixelStride,
+                        imageProxy.width, imageProxy.height, rotationDegrees
+                    )
+                    if (uprightBitmap != null) {
+                        try {
+                            ufldResult = ufld.detect(uprightBitmap)
+                        } finally {
+                            uprightBitmap.recycle()
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            val ufldOk = ufldResult != null && (ufldResult.left != null || ufldResult.right != null)
+
             var tfliteDriftL = false
             var tfliteDriftR = false
             var tfliteConf = 0.05f
@@ -226,23 +273,56 @@ class MlDetectionAnalyzer(
                 }
             }
 
-            val finalIsDriftingLeft = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
-            val finalIsDriftingRight = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
-            val finalConfidence = maxOf(swResult.confidence, tfliteConf)
-            val finalCenterOffset = if (swResult.confidence > 0.3f) swResult.centerOffset else tfliteCenterOffset
+            val finalIsDriftingLeft: Boolean
+            val finalIsDriftingRight: Boolean
+            val finalConfidence: Float
+            val finalCenterOffset: Float
+            val finalLaneWidth: Float
+            val leftVisible: Boolean
+            val rightVisible: Boolean
+            val leftCurve: com.roadguard.app.domain.model.LaneCurve
+            val rightCurve: com.roadguard.app.domain.model.LaneCurve
+            if (ufldOk) {
+                // UFLD won: fit curves through its points, derive offset/width
+                // from the fitted pair. Classic CV is skipped entirely.
+                val ufldCurves = ufldCurvesToDomain(ufldResult!!)
+                val ufldOff = ufldCenterOffset(ufldResult, uprightWidth)
+                val driftGate = 0.04f * (1.5f - laneSensitivity)
+                finalIsDriftingLeft = ufldOff < -uprightWidth * driftGate && ufldResult.confidence > 0.4f
+                finalIsDriftingRight = ufldOff > uprightWidth * driftGate && ufldResult.confidence > 0.4f
+                finalConfidence = ufldResult.confidence
+                finalCenterOffset = ufldOff
+                finalLaneWidth = ufldLaneWidth(ufldResult)
+                leftVisible = ufldResult.left != null
+                rightVisible = ufldResult.right != null
+                leftCurve = ufldCurves.first
+                rightCurve = ufldCurves.second
+            } else {
+                val finalIsDriftingLeftCv = if (swResult.confidence > 0.3f) swResult.isDriftingLeft else tfliteDriftL
+                val finalIsDriftingRightCv = if (swResult.confidence > 0.3f) swResult.isDriftingRight else tfliteDriftR
+                finalIsDriftingLeft = finalIsDriftingLeftCv
+                finalIsDriftingRight = finalIsDriftingRightCv
+                finalConfidence = maxOf(swResult.confidence, tfliteConf)
+                finalCenterOffset = if (swResult.confidence > 0.3f) swResult.centerOffset else tfliteCenterOffset
+                finalLaneWidth = swResult.laneWidth
+                leftVisible = swResult.leftLane?.valid == true
+                rightVisible = swResult.rightLane?.valid == true
+                leftCurve = toDomainCurve(swResult.leftLane)
+                rightCurve = toDomainCurve(swResult.rightLane)
+            }
 
             _laneInfo.value = LaneInfo(
                 isDriftingLeft = finalIsDriftingLeft,
                 isDriftingRight = finalIsDriftingRight,
                 confidence = finalConfidence,
                 centerOffset = finalCenterOffset,
-                laneWidth = swResult.laneWidth,
+                laneWidth = finalLaneWidth,
                 // smoothLane() returns a stale extrapolation with valid=false for a
                 // missed detection; reporting it as "visible" lied in the HUD.
-                leftLaneVisible = swResult.leftLane?.valid == true,
-                rightLaneVisible = swResult.rightLane?.valid == true,
-                leftCurve = toDomainCurve(swResult.leftLane),
-                rightCurve = toDomainCurve(swResult.rightLane),
+                leftLaneVisible = leftVisible,
+                rightLaneVisible = rightVisible,
+                leftCurve = leftCurve,
+                rightCurve = rightCurve,
                 imageWidth = swResult.imageWidth,
                 imageHeight = swResult.imageHeight
             )
@@ -263,6 +343,181 @@ class MlDetectionAnalyzer(
                 yStart = it.yStart, yEnd = it.yEnd, valid = it.valid
             )
         } ?: com.roadguard.app.domain.model.LaneCurve()
+
+    // === UFLD helpers: points -> domain curves / offset / width ===
+    // UFLD returns raw polylines; the HUD expects LaneCurve quadratics, so fit
+    // x = a*y^2 + b*y + c through the points (least squares, same convention
+    // as LaneDetector.fitPolynomial).
+
+    private fun fitQuadratic(
+        xs: FloatArray, ys: FloatArray
+    ): Triple<Float, Float, Float>? {
+        if (xs.size < 3 || xs.size != ys.size) return null
+        val n = xs.size
+        var sY = 0.0; var sY2 = 0.0; var sY3 = 0.0; var sY4 = 0.0
+        var sX = 0.0; var sXY = 0.0; var sXY2 = 0.0
+        for (i in 0 until n) {
+            val x = xs[i].toDouble(); val y = ys[i].toDouble()
+            val y2 = y * y
+            sY += y; sY2 += y2; sY3 += y2 * y; sY4 += y2 * y2
+            sX += x; sXY += x * y; sXY2 += x * y2
+        }
+        // Solve 3x3 normal equations via Cramer.
+        fun det3(m: Array<DoubleArray>): Double {
+            return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+                m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        }
+        val m = arrayOf(
+            doubleArrayOf(sY4, sY3, sY2),
+            doubleArrayOf(sY3, sY2, sY),
+            doubleArrayOf(sY2, sY, n.toDouble())
+        )
+        val d = det3(m)
+        if (abs(d) < 1e-9) return null
+        val mx = arrayOf(
+            doubleArrayOf(sXY2, sY3, sY2),
+            doubleArrayOf(sXY, sY2, sY),
+            doubleArrayOf(sX, sY, n.toDouble())
+        )
+        val my = arrayOf(
+            doubleArrayOf(sY4, sXY2, sY2),
+            doubleArrayOf(sY3, sXY, sY),
+            doubleArrayOf(sY2, sX, n.toDouble())
+        )
+        val mz = arrayOf(
+            doubleArrayOf(sY4, sY3, sXY2),
+            doubleArrayOf(sY3, sY2, sXY),
+            doubleArrayOf(sY2, sY, sX)
+        )
+        val a = (det3(mx) / d).toFloat()
+        if (abs(a) > 0.5f) return null
+        return Triple(a, (det3(my) / d).toFloat(), (det3(mz) / d).toFloat())
+    }
+
+    private fun ufldPointsToCurve(
+        pts: UfldLaneDetector.LanePoints?
+    ): com.roadguard.app.domain.model.LaneCurve {
+        if (pts == null || pts.size < 3) return com.roadguard.app.domain.model.LaneCurve()
+        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
+        var yMin = pts.y[0]; var yMax = pts.y[0]
+        for (y in pts.y) {
+            if (y < yMin) yMin = y
+            if (y > yMax) yMax = y
+        }
+        return com.roadguard.app.domain.model.LaneCurve(
+            a = abc.first, b = abc.second, c = abc.third,
+            yStart = yMin, yEnd = yMax, valid = true
+        )
+    }
+
+    private fun ufldCurvesToDomain(
+        res: UfldLaneDetector.UfldResult
+    ): Pair<com.roadguard.app.domain.model.LaneCurve, com.roadguard.app.domain.model.LaneCurve> {
+        return Pair(ufldPointsToCurve(res.left), ufldPointsToCurve(res.right))
+    }
+
+    private fun ufldLaneCenterX(pts: UfldLaneDetector.LanePoints?): Float? {
+        if (pts == null || pts.size == 0) return null
+        var maxY = Float.NEGATIVE_INFINITY
+        var xAtMaxY = 0f
+        for (i in 0 until pts.size) {
+            if (pts.y[i] > maxY) {
+                maxY = pts.y[i]
+                xAtMaxY = pts.x[i]
+            }
+        }
+        return xAtMaxY
+    }
+
+    private fun ufldCenterOffset(res: UfldLaneDetector.UfldResult, imgW: Int): Float {
+        val lx = ufldLaneCenterX(res.left)
+        val rx = ufldLaneCenterX(res.right)
+        val vehicleCenter = imgW * 0.5f
+        return when {
+            lx != null && rx != null -> vehicleCenter - (lx + rx) / 2f
+            lx != null -> vehicleCenter - lx - 150f
+            rx != null -> vehicleCenter - rx + 150f
+            else -> 0f
+        }
+    }
+
+    private fun ufldLaneWidth(res: UfldLaneDetector.UfldResult): Float {
+        val lx = ufldLaneCenterX(res.left) ?: return 0f
+        val rx = ufldLaneCenterX(res.right) ?: return 0f
+        return (rx - lx).coerceIn(80f, 500f)
+    }
+
+    private fun yuvToUprightBitmap(
+        yBuffer: java.nio.ByteBuffer, yRowStride: Int, yPixelStride: Int,
+        uBuffer: java.nio.ByteBuffer, uRowStride: Int, uPixelStride: Int,
+        vBuffer: java.nio.ByteBuffer, vRowStride: Int, vPixelStride: Int,
+        width: Int, height: Int, rotationDegrees: Int
+    ): android.graphics.Bitmap? {
+        // Build an NV21 image respecting strides, convert via YuvImage, then
+        // rotate to upright. UFLD needs full RGB (markings are color-coded).
+        return try {
+            val y = ByteArray(width * height)
+            val yR = yBuffer.duplicate()
+            val yBase = yBuffer.position()
+            if (yPixelStride == 1 && yRowStride == width) {
+                yR.position(yBase)
+                yR.get(y, 0, minOf(y.size, yBuffer.limit() - yBase))
+            } else {
+                for (row in 0 until height) {
+                    val srcStart = yBase + row * yRowStride
+                    if (srcStart >= yBuffer.limit()) break
+                    if (yPixelStride == 1) {
+                        yR.position(srcStart)
+                        yR.get(y, row * width, minOf(width, yBuffer.limit() - srcStart))
+                    } else {
+                        for (col in 0 until width) {
+                            val idx = srcStart + col * yPixelStride
+                            if (idx >= yBuffer.limit()) break
+                            y[col + row * width] = yR.get(idx)
+                        }
+                    }
+                }
+            }
+            // Interleave V/U for NV21 (VU order), sampling chroma 2x2.
+            val uv = ByteArray(width * height / 2)
+            val uR = uBuffer.duplicate()
+            val vR = vBuffer.duplicate()
+            val uBase = uBuffer.position()
+            val vBase = vBuffer.position()
+            var k = 0
+            for (row in 0 until height / 2) {
+                for (col in 0 until width / 2) {
+                    val ui = uBase + row * uRowStride + col * uPixelStride
+                    val vi = vBase + row * vRowStride + col * vPixelStride
+                    if (vi < vBuffer.limit() && ui < uBuffer.limit() && k + 1 < uv.size) {
+                        uv[k++] = vR.get(vi)
+                        uv[k++] = uR.get(ui)
+                    }
+                }
+            }
+            val nv21 = ByteArray(y.size + uv.size)
+            System.arraycopy(y, 0, nv21, 0, y.size)
+            System.arraycopy(uv, 0, nv21, y.size, uv.size)
+            val yuv = android.graphics.YuvImage(nv21, android.graphics.ImageFormat.NV21, width, height, null)
+            val out = java.io.ByteArrayOutputStream()
+            yuv.compressToJpeg(android.graphics.Rect(0, 0, width, height), 90, out)
+            val bytes = out.toByteArray()
+            var bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            val rot = ((rotationDegrees % 360) + 360) % 360
+            if (rot != 0) {
+                val m = android.graphics.Matrix()
+                m.postRotate(rot.toFloat())
+                val rotated = android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                if (rotated !== bmp) bmp.recycle()
+                bmp = rotated
+            }
+            bmp
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
 
     @SuppressLint("UnsafeOptInUsageError")
     private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy, uprightImageHeight: Int) {

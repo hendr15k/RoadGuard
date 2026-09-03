@@ -16,6 +16,11 @@ class ModelDownloader(private val context: Context) {
 
         val modelSources = listOf(
             ModelSource(
+                name = "UFLD TuSimple Lane Detection (primary)",
+                url = "https://github.com/hendr15k/RoadGuard/releases/download/v1.0.50-models/ufld_tusimple_float16.tflite",
+                description = "Ultra-Fast-Lane-Detection, 800x288, up to 4 lanes — primary lane source"
+            ),
+            ModelSource(
                 name = "Ultra-Fast-Lane-Detection (TuSimple)",
                 url = "https://storage.googleapis.com/download.tensorflow.org/models/tflite/gpu/deeplabv3_257_mv_gpu.tflite",
                 description = "DeepLab v3 segmentation model for road understanding"
