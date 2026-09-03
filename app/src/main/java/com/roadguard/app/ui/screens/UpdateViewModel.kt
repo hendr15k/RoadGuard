@@ -18,6 +18,13 @@ class UpdateViewModel @Inject constructor(
 
     val updateState: StateFlow<UpdateState> = updateChecker.updateState
 
+    init {
+        // Check once per ViewModel lifetime (survives rotation). The old
+        // LaunchedEffect(Unit) in MainScreen refired on every rotation and
+        // spammed the GitHub API into its rate limit.
+        checkForUpdates()
+    }
+
     fun checkForUpdates() {
         viewModelScope.launch {
             updateChecker.checkForUpdates()

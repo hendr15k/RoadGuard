@@ -95,6 +95,7 @@ fun MainScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
+            viewModel.clearDetectionState()
             videoUri = it
             showVideoPicker = true
         }
@@ -104,7 +105,6 @@ fun MainScreen(
         if (!cameraPermissionState.status.isGranted) {
             cameraPermissionState.launchPermissionRequest()
         }
-        updateViewModel.checkForUpdates()
     }
 
     // Haptik/Audio nur noch auf dem entprellten Signal — nicht mehr pro Frame.
@@ -156,6 +156,7 @@ fun MainScreen(
                         laneInfo = laneInfo,
                         vehicleDistance = vehicleDistance,
                         alertState = alertState,
+                        distanceThreshold = settings.minFollowingDistanceMeters,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .padding(top = 48.dp)
@@ -200,6 +201,7 @@ fun MainScreen(
                     laneInfo = laneInfo,
                     vehicleDistance = vehicleDistance,
                     alertState = alertState,
+                    distanceThreshold = settings.minFollowingDistanceMeters,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 48.dp)
@@ -240,7 +242,7 @@ fun MainScreen(
 
         if (showSettings) {
             SettingsBottomSheet(
-                settings = viewModel.settings.collectAsState().value,
+                settings = settings,
                 onSettingsUpdate = viewModel::updateSettings,
                 onDismiss = { showSettings = false }
             )
@@ -474,7 +476,8 @@ fun StatusBar(
     laneInfo: com.roadguard.app.domain.model.LaneInfo?,
     vehicleDistance: com.roadguard.app.domain.model.VehicleDistance?,
     alertState: AlertState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    distanceThreshold: Float = 20f
 ) {
     val activeType = (alertState as? AlertState.Warning)?.takeIf { it.phase == AlertPhase.ACTIVE }?.type
     Row(
@@ -533,7 +536,8 @@ fun StatusBar(
             }
         }
 
-        // Distance
+        // Distance — thresholds scale with the user's setting (were hardcoded
+        // 15/25 while the real alarm uses minFollowingDistanceMeters).
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("DIST", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
             Text(
@@ -541,8 +545,8 @@ fun StatusBar(
                 color = when {
                     activeType is WarningType.ForwardCollision -> DangerRed
                     vehicleDistance == null -> Color.Gray
-                    vehicleDistance.distanceMeters < 15f -> DangerRed
-                    vehicleDistance.distanceMeters < 25f -> WarningYellow
+                    vehicleDistance.distanceMeters < distanceThreshold * 0.75f -> DangerRed
+                    vehicleDistance.distanceMeters < distanceThreshold * 1.25f -> WarningYellow
                     else -> SafeGreen
                 },
                 style = MaterialTheme.typography.titleSmall

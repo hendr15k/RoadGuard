@@ -48,8 +48,10 @@ class AlertPolicyTest {
         settings: AppSettings = AppSettings()
     ) = policy.evaluate(
         settings = settings,
-        laneInfo = laneInfo,
-        distance = distance,
+        // Tests feed logical frames: stamp them fresh so the STALE_MS gate
+        // (meant for paused video/stalled pipelines) never fires here.
+        laneInfo = laneInfo?.copy(timestamp = nowMs),
+        distance = distance?.copy(timestamp = nowMs),
         nowMs = nowMs
     )
 
@@ -172,10 +174,13 @@ class AlertPolicyTest {
 
     @Test
     fun aStaleDistanceSampleDoesNotHoldAnAlarm() {
-        feed(nowMs = 1_000, distance = tooClose)
-        val evaluation = feed(
-            nowMs = 1_000 + AlertPolicy.COLLISION_CONFIRM_MS + AlertPolicy.STALE_MS,
-            distance = tooClose
+        val staleAt = 1_000 + AlertPolicy.COLLISION_CONFIRM_MS + AlertPolicy.STALE_MS
+        val evaluation = policy.evaluate(
+            settings = AppSettings(),
+            laneInfo = null,
+            // feed() stamps fresh — bypass it to simulate a paused pipeline.
+            distance = tooClose.copy(timestamp = tooClose.timestamp),
+            nowMs = staleAt
         )
 
         assertEquals(AlertState.Idle, evaluation.state)
@@ -282,5 +287,32 @@ class AlertPolicyTest {
             (lastSignal?.repeatIndex ?: -1) >= 1
         )
         assertTrue("a sustained collision must escalate to urgent", lastSignal?.urgent == true)
+    }
+
+    @Test
+    fun aStaleLaneSampleNeverConfirmsOrHoldsAnAlarm() {
+        // Paused video / stalled pipeline: the lane sample keeps the frame's
+        // capture timestamp. Older than STALE_MS it must behave like "no lane".
+        // NOTE: feed() stamps samples fresh, so bypass it here to simulate
+        // the stale frame — that stamping is exactly what this test avoids.
+        val staleAt = AlertPolicy.STALE_MS + 1_000
+        val staleEval = policy.evaluate(
+            settings = AppSettings(),
+            laneInfo = driftingLeft.copy(timestamp = 0L),
+            distance = null,
+            nowMs = staleAt
+        )
+        assertEquals(AlertState.Idle, staleEval.state)
+        assertNull(staleEval.signal)
+
+        // Fresh samples confirm as before.
+        val now = AlertPolicy.STALE_MS + 1_000
+        feed(nowMs = now, laneInfo = driftingLeft.copy(timestamp = now))
+        val confirmed = feed(
+            nowMs = now + AlertPolicy.LANE_CONFIRM_MS,
+            laneInfo = driftingLeft.copy(timestamp = now + AlertPolicy.LANE_CONFIRM_MS)
+        )
+        assertEquals(AlertPhase.ACTIVE, confirmed.state.phaseOrNull())
+        assertEquals(WarningType.LaneDepartureLeft, confirmed.signal?.type)
     }
 }

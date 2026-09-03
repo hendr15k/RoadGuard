@@ -20,7 +20,11 @@ data class LaneInfo(
     val leftCurve: LaneCurve = LaneCurve(),
     val rightCurve: LaneCurve = LaneCurve(),
     val imageWidth: Int = 0,
-    val imageHeight: Int = 0
+    val imageHeight: Int = 0,
+    /** Capture time of the frame this sample was computed from. Lets the
+     * alert gate expire lane hazards like collision samples — otherwise a
+     * paused video or stalled pipeline holds the last lane alarm forever. */
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 data class VehicleDistance(

@@ -62,4 +62,19 @@ class VehiclePipelineTest {
         assertEquals(true, distance in 3f..150f)
         assertEquals(false, distance == 100f)
     }
+
+    @Test
+    fun areaGateUsesRealFrameAspectNotSquare() {
+        // 640x360 frame: the old imageHeight² normalization overestimated the
+        // ratio ~1.8x and rejected plausible boxes. A box covering 30% of the
+        // real frame must be accepted regardless of aspect.
+        val wide = box(left = 0, top = 100, right = 384, bottom = 292) // 384x192 = 30.9% of 640x360
+        val wideObj = listOf(fakeObject(box = wide, labels = emptyList()))
+        val closestWide = pipeline.selectClosestVehicle(wideObj, imageHeight = 360, imageWidth = 640)
+        assertNotNull("30% of a 640x360 frame is a plausible vehicle", closestWide)
+
+        // Same pixel box on a square frame is 1.1% — a speck, must be rejected.
+        val closestSquare = pipeline.selectClosestVehicle(wideObj, imageHeight = 1920, imageWidth = 1920)
+        assertNull("same box on a huge square frame is a speck", closestSquare)
+    }
 }

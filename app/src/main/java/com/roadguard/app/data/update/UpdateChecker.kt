@@ -157,10 +157,14 @@ class UpdateChecker @Inject constructor(
         // Nur zusammenhängende Ziffernblöcke je Segment nehmen. Ein globales
         // Entfernen aller Nicht-Ziffern ("v1.0.46-46-g3bae404" → "1.0.46463")
         // verfälschte den Vergleich durch konkatenierte Zahlen.
+        // takeWhile würde das "v"-Präfix fressen ("v1".takeWhile→"" wird
+        // geskippt, "v1.0.46" parst zu [0,46]) — daher führende Buchstaben
+        // strippen und dann den Ziffernblock nehmen.
         val segments = version.split('.', '-', '+', '_', ' ')
         val numbers = mutableListOf<Int>()
         for (segment in segments) {
-            val digits = segment.takeWhile { it.isDigit() }
+            val stripped = segment.dropWhile { !it.isDigit() }
+            val digits = stripped.takeWhile { it.isDigit() }
             if (digits.isNotEmpty()) {
                 numbers.add(digits.toIntOrNull() ?: 0)
             }

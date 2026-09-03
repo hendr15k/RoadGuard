@@ -42,7 +42,6 @@ class MlDetectionAnalyzer(
     private val laneDetector = LaneDetector(laneSensitivity)
     private var tfliteRunner: TfliteModelRunner? = null
     private var ufldDetector: UfldLaneDetector? = null
-    private var ufldLoadAttempted = false
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -85,6 +84,14 @@ class MlDetectionAnalyzer(
     @Volatile
     private var modelLoadAttempted = false
 
+    /** Guards the ML Kit detector so close() cannot dispose it mid-frame. */
+    private val detectorLock = Any()
+    private var ufldRetryAtMs = 0L
+    private companion object {
+        /** Minimum gap between UFLD (re-)load attempts. */
+        private const val UFLD_RETRY_COOLDOWN_MS = 30_000L
+    }
+
     init {
         // Only construct the runners here. Mapping models and building the
         // native interpreters belongs on the analyzer thread, not in composition.
@@ -105,10 +112,15 @@ class MlDetectionAnalyzer(
     private val modelLock = Any()
 
     private fun ensureUfldLoaded(): UfldLaneDetector? {
-        if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
+        ufldDetector?.takeIf { it.isLoaded() }?.let { return it }
         synchronized(modelLock) {
-            if (ufldLoadAttempted) return ufldDetector?.takeIf { it.isLoaded() }
-            ufldLoadAttempted = true
+            ufldDetector?.takeIf { it.isLoaded() }?.let { return it }
+            // Retry with cooldown instead of a one-shot flag: a model
+            // downloaded later (or a transient load failure) previously
+            // needed a full process restart to take effect.
+            val now = System.currentTimeMillis()
+            if (now - ufldRetryAtMs < UFLD_RETRY_COOLDOWN_MS) return null
+            ufldRetryAtMs = now
             try {
                 ufldDetector?.loadModel()
             } catch (e: Exception) {
@@ -329,12 +341,24 @@ class MlDetectionAnalyzer(
                 imageHeight = swResult.imageHeight
             )
 
-            detectVehicles(inputImage, imageProxy, uprightHeight)
+            // Close must be serialized with a frame still in process: closing
+            // the detector mid-frame crashes ("Cannot use closed Detector").
+            synchronized(detectorLock) {
+                if (closed) {
+                    imageProxy.close()
+                    return
+                }
+                detectVehicles(inputImage, imageProxy, uprightHeight, uprightWidth)
+            }
         } catch (e: Exception) {
             // Wenn der synchrone Teil (LaneDetector etc.) crasht, müssen wir
             // trotzdem close() aufrufen, sonst hängt der CameraX-Frame-Queue.
             e.printStackTrace()
-            imageProxy.close()
+            try {
+                imageProxy.close()
+            } catch (closeEx: Exception) {
+                closeEx.printStackTrace()
+            }
         }
     }
 
@@ -529,19 +553,28 @@ class MlDetectionAnalyzer(
     }
 
     @SuppressLint("UnsafeOptInUsageError")
-    private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy, uprightImageHeight: Int) {
+    private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy, uprightImageHeight: Int, uprightImageWidth: Int) {
         // close() läuft IMMER im onCompleteListener, nie synchron davor.
         // So vermeiden wir "trying to use closed ImageProxy"-Crashes, die
         // auftreten, wenn ML Kit noch auf die underlying mediaImage-Buffer
         // zugreift während wir sie schon zurückgeben.
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
-                if (closed) return@addOnSuccessListener
-                processVehicleResult(detectedObjects, uprightImageHeight)
+                // Serialize with close() and other in-flight callbacks: frames
+                // can overlap (throttle < ML Kit latency) and the tracking
+                // state below is mutated from callback threads.
+                synchronized(detectorLock) {
+                    if (closed) return@addOnSuccessListener
+                    processVehicleResult(detectedObjects, uprightImageHeight, uprightImageWidth)
+                }
             }
             .addOnFailureListener {
-                if (closed) return@addOnFailureListener
-                _vehicleDistance.value = null
+                // closed ist @Volatile, der Read unter Lock serialisiert
+                // zusätzlich gegen einen parallel laufenden Success-Callback.
+                synchronized(detectorLock) {
+                    if (closed) return@addOnFailureListener
+                    _vehicleDistance.value = null
+                }
             }
             .addOnCompleteListener {
                 try {
@@ -558,7 +591,8 @@ class MlDetectionAnalyzer(
 
     private fun processVehicleResult(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
-        imageHeight: Int
+        imageHeight: Int,
+        imageWidth: Int
     ) {
         // Delegates label- vs geometry-fallback to the JVM-tested VehiclePipeline.
         // The base ML Kit model never emits Vehicle/Car labels (only
@@ -569,7 +603,7 @@ class MlDetectionAnalyzer(
                 obj.labels.map { VehiclePipeline.Label(it.text, it.confidence) }
             )
         }
-        val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight)
+        val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight, imageWidth)
         var closestVehicle: DetectedVehicle? = null
         if (candidate != null) {
             val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight)
@@ -695,15 +729,24 @@ class MlDetectionAnalyzer(
 
     fun close() {
         closed = true
-        try {
-            objectDetector.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        try {
-            tfliteRunner?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
+        // Serialized with in-flight frames (see analyze()): disposing the
+        // ML Kit detector or the TFLite/UFLD interpreters mid-frame crashes.
+        synchronized(detectorLock) {
+            try {
+                objectDetector.close()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                tfliteRunner?.close()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                ufldDetector?.close()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
     

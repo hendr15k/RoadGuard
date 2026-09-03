@@ -32,13 +32,17 @@ fun UpdateBanner(
 ) {
     val context = LocalContext.current
 
+    // Hoisted so the exit animation keeps rendering content: reading
+    // `updateState as? UpdateAvailable` inside AnimatedVisibility goes null
+    // on dismiss and an empty card animates out instead of the content.
+    val available = updateState as? UpdateState.UpdateAvailable
     AnimatedVisibility(
-        visible = updateState is UpdateState.UpdateAvailable,
+        visible = available != null,
         enter = expandVertically(),
         exit = shrinkVertically(),
         modifier = modifier
     ) {
-        (updateState as? UpdateState.UpdateAvailable)?.let { state ->
+        available?.let { state ->
             Card(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -18,9 +18,11 @@ class GitHubApiService @Inject constructor(
 
     companion object {
         private const val TAG = "GitHubApiService"
-        // ?per_page=1: nur das aktuellste Release holen. Spart Bandbreite
-        // (war: alle Releases als JSON-Array) und Parsing-Zeit.
-        private const val RELEASES_URL = "https://api.github.com/repos/hendr15k/RoadGuard/releases?per_page=1"
+        // /releases/latest statt Listen-Endpoint: die Liste (?per_page=1 +
+        // first()) kann einen Prerelease/Draft als "latest" liefern; der
+        // latest-Endpoint filtert diese serverseitig heraus. Liefert ein
+        // Objekt statt eines Arrays — Parsing unten folgt dem.
+        private const val RELEASES_URL = "https://api.github.com/repos/hendr15k/RoadGuard/releases/latest"
     }
 
     private val gson = Gson()
@@ -69,12 +71,16 @@ class GitHubApiService @Inject constructor(
 
             if (responseCode == HttpURLConnection.HTTP_OK) {
                 val response = connection.inputStream.bufferedReader().use { it.readText() }
-                val releases = gson.fromJson(response, Array<GitHubRelease>::class.java)
-                if (releases.isNotEmpty()) {
-                    Result.success(releases.first())
-                } else {
-                    Result.failure(Exception("No releases found"))
-                }
+                // /releases/latest liefert ein einzelnes Objekt (kein Array).
+                // Gson gibt bei leerem/ungültigem Body null zurück — das als
+                // Fehler behandeln statt success(null) zu propagieren.
+                val release = try {
+                    gson.fromJson(response, GitHubRelease::class.java)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse latest release", e)
+                    null
+                } ?: return@withContext Result.failure(Exception("No releases found"))
+                Result.success(release)
             } else {
                 Log.e(TAG, "HTTP Error: $responseCode")
                 Result.failure(Exception("HTTP Error: $responseCode"))
