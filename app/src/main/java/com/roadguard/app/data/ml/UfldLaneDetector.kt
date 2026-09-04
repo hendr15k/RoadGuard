@@ -442,8 +442,13 @@ class UfldLaneDetector(private val context: Context) {
                     loc += (k + 1) * (expVals[k] / sumExp)
                 }
                 // Reference formula in 1280x720 cfg space, then scale to image.
+                // Row-axis pairing: base=(NUM_ROWS-1-row) reads bottom-up, so the
+                // anchor must use the same axis (NUM_ROWS-1-row). ROW_ANCHORS[row]
+                // pairs the bottom row's logits with the top anchor (y inverted),
+                // which shrinks the ego gap and fails the pair gate on straight
+                // roads (validated frame-by-frame vs reference decode on-device).
                 val pxCfg = loc * (800f / GRIDING_NUM) * (CFG_W / 800f) - 1f
-                val pyCfg = CFG_H * (ROW_ANCHORS[row] / 288f) - 1f
+                val pyCfg = CFG_H * (ROW_ANCHORS[NUM_ROWS - 1 - row] / 288f) - 1f
                 xs.add(pxCfg * imgW / CFG_W)
                 ys.add(pyCfg * imgH / CFG_H)
             }
