@@ -1,29 +1,43 @@
 package com.roadguard.app.data.ml
 
+import kotlin.math.abs
+
 /**
- * Pure-JVM decision whether a UFLD ego-pair sample may raise a lane-departure
- * warning, shared by [MlDetectionAnalyzer] and [VideoMlAnalyzer].
+ * Pure-JVM decision whether a lane sample may raise a lane-departure warning,
+ * shared by [MlDetectionAnalyzer] and [VideoMlAnalyzer].
+ *
+ * ## History
  *
  * Both analyzers used to derive the drift flags straight from
- * `ufldCenterOffset()` whenever the UFLD branch ran. That helper measures the
- * bottom-most point of each returned polyline and, for a missing side, invents
- * the offset from a fixed ±150 px fudge — so it produced a number either way:
+ * `ufldCenterOffset()` whenever the UFLD branch ran. That helper measures a
+ * point of each returned polyline and, for a missing side, invents the offset
+ * from a fixed ±150 px fudge — so it produced a number either way:
  *
- *  - **stub curves** — UFLD occasionally returns a short stub (a curb fragment
- *    a few rows tall). `ufldPointsToCurve` rejects it via the span gate and
- *    reports `valid = false`, but the drift flags were still computed from the
- *    stub's sky-high bottom point and fired a departure warning for a lane the
+ *  - **stub curves** — UFLD occasionally returns a short fragment (a curb a
+ *    few rows tall). The span gate rejects it, but the drift flags were still
+ *    computed from the stub's bottom point and fired a warning for a lane the
  *    overlay refused to draw.
  *  - **mirrored samples** — the single-lane fallback mirrors the one visible
- *    boundary at the expected ego width. The mirrored side is a guess, so any
- *    offset derived from it is fabricated; the detector already caps its
- *    confidence below [com.roadguard.app.domain.model.AlertPolicy.MIN_LANE_CONFIDENCE]
- *    for exactly that reason (see `UfldLaneDetector.detect`). The gate below
- *    enforces the same rule for the overlay/drift flags rather than relying on
- *    the caller to remember.
+ *    boundary. Any offset derived from it is fabricated; the detector caps its
+ *    confidence below the floor for exactly that reason, and the gate below
+ *    enforces the same rule rather than trusting the caller to remember.
  *
- * A departure warning therefore requires a *complete, confident* pair: both
- * curves fitted (not stubs) and the sample over the confidence floor.
+ * ## v2
+ *
+ * A warning now additionally requires:
+ *
+ *  - **enough history.** The per-frame offset jitters by several pixels even
+ *    on a straight road (measured std 13-27 px across 11 clips), so a single
+ *    sample is not a departure. The caller feeds the temporal median and this
+ *    gate refuses until [MIN_HISTORY] samples exist.
+ *  - **physical plausibility.** An offset step larger than half an ego lane
+ *    between two samples is not a lateral movement, it is a bad detection.
+ *  - **a lane-relative window.** 4 % of the frame width means a different
+ *    thing for every field of view: on a 640 px wide, 1088 px lane it is 11 %
+ *    of the lane, on a 1280 px frame with a 900 px lane it is 6 %. The window
+ *    is therefore the larger of the user-facing fraction and a fixed share of
+ *    the ego lane half-width, so a wide-angle camera no longer produces
+ *    warnings for a deviation that is barely a tenth of the lane.
  */
 object LaneDriftGate {
 
@@ -33,13 +47,54 @@ object LaneDriftGate {
     /** Fraction of the frame width the centre must leave before this is a drift. */
     const val BASE_OFFSET_FRACTION = 0.04f
 
+    /** Additional lane-relative floor: this share of the ego half-width. */
+    const val RELATIVE_HALF_WIDTH_FRACTION = 0.5f
+
+    /** Samples required before an offset may warn (~0.6 s at the 5 Hz rate). */
+    const val MIN_HISTORY = 3
+
+    /**
+     * Offset step between two samples that cannot be a real lane movement,
+     * as a fraction of the ego lane width.
+     */
+    const val MAX_STEP_FRACTION = 0.5f
+
     /** Higher sensitivity narrows the window (1.5 - sensitivity, so 0.5 → 1.0). */
     fun offsetFraction(sensitivity: Float): Float =
         BASE_OFFSET_FRACTION * (1.5f - sensitivity)
 
     /**
-     * @param leftCurveValid  the left UFLD polyline passed the span gate and was fitted
+     * The offset a departure must exceed, in pixels.
+     *
+     * @param laneWidth measured ego lane width (px); <= 0 falls back to the
+     *   frame-relative window alone.
+     */
+    fun thresholdPx(
+        frameWidth: Int,
+        sensitivity: Float,
+        laneWidth: Float = 0f
+    ): Float {
+        val frameRelative = frameWidth * offsetFraction(sensitivity)
+        if (laneWidth <= 0f) return frameRelative
+        val laneRelative = RELATIVE_HALF_WIDTH_FRACTION * laneWidth / 2f
+        return maxOf(frameRelative, laneRelative)
+    }
+
+    /** True when the offset jumped further than a vehicle can move between samples. */
+    fun isImplausibleStep(
+        previousOffset: Float,
+        currentOffset: Float,
+        laneWidth: Float
+    ): Boolean {
+        if (laneWidth <= 0f) return false
+        return abs(currentOffset - previousOffset) > MAX_STEP_FRACTION * laneWidth
+    }
+
+    /**
+     * @param leftCurveValid  the left polyline passed the span gate and was fitted
      * @param rightCurveValid same for the right side
+     * @param historySize     number of offset samples collected so far
+     * @param laneWidth       measured ego lane width, for the relative window
      */
     fun isDriftingLeft(
         centerOffset: Float,
@@ -47,9 +102,11 @@ object LaneDriftGate {
         sensitivity: Float,
         confidence: Float,
         leftCurveValid: Boolean,
-        rightCurveValid: Boolean
-    ): Boolean = usablePair(confidence, leftCurveValid, rightCurveValid) &&
-        centerOffset < -frameWidth * offsetFraction(sensitivity)
+        rightCurveValid: Boolean,
+        historySize: Int = MIN_HISTORY,
+        laneWidth: Float = 0f
+    ): Boolean = usablePair(confidence, leftCurveValid, rightCurveValid, historySize) &&
+        centerOffset < -thresholdPx(frameWidth, sensitivity, laneWidth)
 
     fun isDriftingRight(
         centerOffset: Float,
@@ -57,13 +114,17 @@ object LaneDriftGate {
         sensitivity: Float,
         confidence: Float,
         leftCurveValid: Boolean,
-        rightCurveValid: Boolean
-    ): Boolean = usablePair(confidence, leftCurveValid, rightCurveValid) &&
-        centerOffset > frameWidth * offsetFraction(sensitivity)
+        rightCurveValid: Boolean,
+        historySize: Int = MIN_HISTORY,
+        laneWidth: Float = 0f
+    ): Boolean = usablePair(confidence, leftCurveValid, rightCurveValid, historySize) &&
+        centerOffset > thresholdPx(frameWidth, sensitivity, laneWidth)
 
     private fun usablePair(
         confidence: Float,
         leftCurveValid: Boolean,
-        rightCurveValid: Boolean
-    ): Boolean = confidence > MIN_CONFIDENCE && leftCurveValid && rightCurveValid
+        rightCurveValid: Boolean,
+        historySize: Int
+    ): Boolean = confidence > MIN_CONFIDENCE && leftCurveValid && rightCurveValid &&
+        historySize >= MIN_HISTORY
 }
