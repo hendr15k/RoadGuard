@@ -13,8 +13,8 @@ android {
         applicationId = "com.roadguard.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "v1.0.56"
+        versionCode = 17
+        versionName = "v1.0.57"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -66,9 +66,15 @@ val downloadUfldModel by tasks.registering(Exec::class) {
     description = "Fetch the bundled UFLD model (skipped when present)"
     commandLine(
         "sh", "-c",
+        // -f: without it curl writes the 404/HTML error body into the asset and
+        // the APK ships a ~200 byte "model" that TFLite rejects at runtime with
+        // a green build. The size check catches a truncated download too.
         "if [ ! -f src/main/assets/ufld_tusimple_float16.tflite ]; then " +
-            "curl -sSL -o src/main/assets/ufld_tusimple_float16.tflite " +
-            "https://github.com/hendr15k/RoadGuard/releases/download/v1.0.50-models/ufld_tusimple_float16.tflite; fi"
+            "curl -fsSL -o src/main/assets/ufld_tusimple_float16.tflite " +
+            "https://github.com/hendr15k/RoadGuard/releases/download/v1.0.50-models/ufld_tusimple_float16.tflite && " +
+            "if [ \"$(wc -c < src/main/assets/ufld_tusimple_float16.tflite)\" -lt 10000000 ]; then " +
+            "echo 'UFLD model download incomplete' >&2; " +
+            "rm -f src/main/assets/ufld_tusimple_float16.tflite; exit 1; fi; fi"
     )
     outputs.file(ufldModelFile)
 }

@@ -12,6 +12,10 @@ import org.junit.Test
  * pipelines (live camera or a video file that can be paused), so a single frame
  * must never trigger an alarm, a stale sample must not keep one ringing, and a
  * collision must always outrank a lane drift.
+ *
+ * The tests below feed the two pipelines independently. Feeding both on every
+ * step (as this file used to) can never observe the "only one pipeline
+ * published this tick" case that MainViewModel actually produces.
  */
 class AlertPolicyTest {
 
@@ -314,5 +318,69 @@ class AlertPolicyTest {
         )
         assertEquals(AlertPhase.ACTIVE, confirmed.state.phaseOrNull())
         assertEquals(WarningType.LaneDepartureLeft, confirmed.signal?.type)
+    }
+
+    @Test
+    fun aFastClosingVehicleFarAwayIsNotACollision() {
+        // isTooClose also covers "closing fast" (ttc < 2.5 s) at 60 m distance.
+        // The gate used to accept that as ForwardCollision, outrank every lane
+        // departure for minutes and escalate to the urgent pattern without the
+        // vehicle ever being near.
+        val farButClosing = VehicleDistance(
+            distanceMeters = 60f,
+            isTooClose = true,
+            timeToCollision = 2.0f
+        )
+
+        feed(nowMs = 1_000, distance = farButClosing)
+        val evaluation = feed(nowMs = 1_000 + AlertPolicy.COLLISION_CONFIRM_MS, distance = farButClosing)
+
+        assertNull("a vehicle 60 m ahead is not a collision", evaluation.signal)
+        assertEquals(null, evaluation.state.typeOrNull())
+    }
+
+    @Test
+    fun aGenuinelyCloseVehicleStillConfirmsAsCollision() {
+        val closeEnough = tooClose.copy(distanceMeters = AlertPolicy.COLLISION_TTC_RANGE_M - 1f)
+
+        feed(nowMs = 1_000, distance = closeEnough)
+        val evaluation = feed(nowMs = 1_000 + AlertPolicy.COLLISION_CONFIRM_MS, distance = closeEnough)
+
+        assertEquals(WarningType.ForwardCollision, evaluation.state.typeOrNull())
+        assertEquals(WarningType.ForwardCollision, evaluation.signal?.type)
+    }
+
+    // --- independent pipelines ------------------------------------------------
+
+    @Test
+    fun aLaneHazardConfirmsWhileTheVehiclePipelineIsSilent() {
+        // Live camera: the lane pipeline publishes every frame, the vehicle
+        // pipeline only when it sees something. On the ticks where the vehicle
+        // hook is not called at all (or carries an empty sample) the lane
+        // confirmation window must keep running instead of starting over.
+        val farVehicle = VehicleDistance(
+            distanceMeters = 80f,
+            isTooClose = false,
+            timeToCollision = Float.MAX_VALUE
+        )
+        feed(nowMs = 1_000, laneInfo = driftingLeft, distance = farVehicle)
+        feed(nowMs = 1_300, laneInfo = driftingLeft, distance = null)
+        val evaluation = feed(nowMs = 2_000, laneInfo = driftingLeft, distance = null)
+
+        assertEquals(WarningType.LaneDepartureLeft, evaluation.state.typeOrNull())
+        assertEquals(AlertPhase.ACTIVE, evaluation.state.phaseOrNull())
+        assertEquals(WarningType.LaneDepartureLeft, evaluation.signal?.type)
+    }
+
+    @Test
+    fun aNonHazardVehicleSampleDoesNotRestartTheLaneConfirmation() {
+        // A vehicle that is not too close is not a hazard and must not reset
+        // the lane hazard's confirmation window.
+        val farVehicle = VehicleDistance(distanceMeters = 80f, isTooClose = false)
+        feed(nowMs = 1_000, laneInfo = driftingLeft, distance = farVehicle)
+        val evaluation = feed(nowMs = 2_000, laneInfo = driftingLeft, distance = farVehicle)
+
+        assertEquals(WarningType.LaneDepartureLeft, evaluation.state.typeOrNull())
+        assertEquals(AlertPhase.ACTIVE, evaluation.state.phaseOrNull())
     }
 }

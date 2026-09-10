@@ -72,6 +72,14 @@ class VideoMlAnalyzer(
     /** Guards the ML Kit detector so close() cannot dispose it mid-frame. */
     private val detectorLock = Any()
 
+    /**
+     * One lane sample per frame max: repeated identical emissions re-stamped
+     * the alert gate with "now" and held a stale hazard open forever. The
+     * sample therefore carries the frame's capture time.
+     */
+    @Volatile
+    private var lastLaneStampMs = 0L
+
     init {
         // Only construct the runners here; loading maps the model and builds the
         // native interpreter, which must not happen during composition.
@@ -248,7 +256,7 @@ class VideoMlAnalyzer(
             // classic result, so fall back to the raw frame size.
             val refW = swResult?.imageWidth ?: bitmap.width
             val refH = swResult?.imageHeight ?: bitmap.height
-            _laneInfo.value = LaneInfo(
+            val laneSample = LaneInfo(
                 isDriftingLeft = finalIsDriftingLeft,
                 isDriftingRight = finalIsDriftingRight,
                 confidence = finalConfidence,
@@ -261,14 +269,21 @@ class VideoMlAnalyzer(
                 leftCurve = leftCurve,
                 rightCurve = rightCurve,
                 imageWidth = refW,
-                imageHeight = refH
+                imageHeight = refH,
+                timestamp = currentTime
             )
+            if (currentTime != lastLaneStampMs) {
+                lastLaneStampMs = currentTime
+                _laneInfo.value = laneSample
+            }
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
             synchronized(detectorLock) {
-                if (closed) return
-                detectVehicles(inputImage, bitmap, height, bitmap.width)
-                handedToMlKit = true
+                // `return` here would skip the finally and leak the bitmap.
+                if (!closed) {
+                    detectVehicles(inputImage, bitmap, height, bitmap.width)
+                    handedToMlKit = true
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()

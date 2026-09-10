@@ -74,9 +74,14 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "VERSION_NAME=$VERSION" >> $GITHUB_OUTPUT
 
+      # A green build does not mean a green test suite: the workflow only ran
+      # assembleDebug, so the JVM contract tests (alert gate, ego-pair
+      # selection, upright-buffer indexing) never gated a release.
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
