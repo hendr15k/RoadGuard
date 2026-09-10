@@ -20,8 +20,24 @@ class VehiclePipeline {
 
     // Keep in sync with analyzers' real heuristics.
     private val vehicleCategories = setOf("Vehicle", "Car", "Truck", "Bus", "Motorcycle", "Bicycle")
-    private val focalLengthPixels = 1500f
     private val vehicleHeightMeters = 1.5f
+
+    companion object {
+        /**
+         * Focal length in pixels at the reference width below. A pixel focal
+         * length is resolution dependent, so it must be rescaled to the frame
+         * actually being analysed: the old fixed 1500 px was calibrated for
+         * ~1080p, while the video path feeds 640x360 frames and CameraX feeds
+         * whatever the device negotiated. The same car therefore read ~3x
+         * farther in video mode than in camera mode, and `isTooClose` (a meter
+         * threshold) never fired at the right distance.
+         */
+        const val FOCAL_LENGTH_PX_AT_REFERENCE = 1500f
+        const val REFERENCE_WIDTH_PX = 1920f
+
+        fun focalLengthPixels(imageWidth: Int): Float =
+            FOCAL_LENGTH_PX_AT_REFERENCE * (imageWidth.toFloat().coerceAtLeast(1f) / REFERENCE_WIDTH_PX)
+    }
 
     fun isExplicitVehicle(labels: List<Label>): Boolean =
         labels.any { label ->
@@ -50,7 +66,7 @@ class VehiclePipeline {
         var bestDist = Float.MAX_VALUE
         for (d in detections) {
             if (!isExplicitVehicle(d.labels)) continue
-            val dist = estimateDistance(d.boundingBox, imageHeight)
+            val dist = estimateDistance(d.boundingBox, imageHeight, imageWidth)
             if (dist < bestDist) { bestDist = dist; best = Candidate(d.boundingBox, d.labels.firstOrNull()?.text ?: "Vehicle") }
         }
         if (best != null) return best
@@ -61,7 +77,7 @@ class VehiclePipeline {
             // treating it as "no vehicle".
             if (d.labels.any { l -> vehicleCategories.any { cat -> l.text.contains(cat, ignoreCase = true) } }) continue
             if (!isVehicleSized(d.boundingBox, imageHeight, imageWidth)) continue
-            val dist = estimateDistance(d.boundingBox, imageHeight)
+            val dist = estimateDistance(d.boundingBox, imageHeight, imageWidth)
             // Geometric fallback is lower confidence: require plausible distance.
             if (dist > 80f) continue
             if (dist < bestDist) { bestDist = dist; best = Candidate(d.boundingBox, "Vehicle") }
@@ -69,11 +85,11 @@ class VehiclePipeline {
         return best
     }
 
-    fun estimateDistance(boundingBox: VehicleBox, imageHeight: Int): Float {
+    fun estimateDistance(boundingBox: VehicleBox, imageHeight: Int, imageWidth: Int = imageHeight): Float {
         val boxHeight = boundingBox.height.toFloat()
         val boxBottom = boundingBox.bottom.toFloat()
         if (boxHeight <= 0) return 100f
-        val distanceByHeight = (focalLengthPixels * vehicleHeightMeters) / boxHeight
+        val distanceByHeight = (focalLengthPixels(imageWidth) * vehicleHeightMeters) / boxHeight
         val horizonY = imageHeight * 0.4f
         val groundY = imageHeight.toFloat()
         val normalizedBottom = (boxBottom - horizonY) / (groundY - horizonY)
@@ -83,14 +99,3 @@ class VehiclePipeline {
         return combinedDistance.coerceIn(3f, 150f)
     }
 }
-
-// Thin adapters so the JVM test can stay free of ML Kit.
-// The test uses `box =` as a short alias for `boundingBox`.
-data class FakeLabel(val text: String, val confidence: Float)
-data class FakeDetectedObject(val boundingBox: VehicleBox, val labels: List<FakeLabel> = emptyList())
-fun VehiclePipeline.selectClosestVehicleRect(objects: List<android.graphics.Rect>, labels: List<List<FakeLabel>>, imageHeight: Int, imageWidth: Int = imageHeight): VehiclePipeline.Candidate? =
-    selectClosestVehicle(objects.mapIndexed { i, r -> VehiclePipeline.Detection(VehicleBox(r.left,r.top,r.right,r.bottom), labels.getOrNull(i)?.map { VehiclePipeline.Label(it.text,it.confidence)} ?: emptyList()) }, imageHeight, imageWidth)
-
-fun fakeObject(box: VehicleBox, labels: List<FakeLabel> = emptyList()) = FakeDetectedObject(boundingBox = box, labels = labels)
-fun VehiclePipeline.selectClosestVehicle(objects: List<FakeDetectedObject>, imageHeight: Int, imageWidth: Int = imageHeight): VehiclePipeline.Candidate? =
-    selectClosestVehicle(objects.map { VehiclePipeline.Detection(it.boundingBox, it.labels.map { l -> VehiclePipeline.Label(l.text, l.confidence) }) }, imageHeight, imageWidth)

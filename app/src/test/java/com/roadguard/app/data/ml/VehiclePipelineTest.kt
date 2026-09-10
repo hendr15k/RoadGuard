@@ -4,6 +4,7 @@ package com.roadguard.app.data.ml
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -76,5 +77,35 @@ class VehiclePipelineTest {
         // Same pixel box on a square frame is 1.1% — a speck, must be rejected.
         val closestSquare = pipeline.selectClosestVehicle(wideObj, imageHeight = 1920, imageWidth = 1920)
         assertNull("same box on a huge square frame is a speck", closestSquare)
+    }
+
+    @Test
+    fun theDistanceIsPinnedToAKnownGeometry() {
+        // 1920-wide reference frame, 1.5 m vehicle, box 200 px tall -> the
+        // height term alone is 1500*1.5/200 = 11.25 m; a 600 px tall frame with
+        // the box bottom on the ground line adds the position term 5/1.0 = 5 m.
+        // Pinning the number is the point: the previous assertion only locked
+        // the clamp at the end of the function, so any wrong formula passed.
+        val distance = pipeline.estimateDistance(box(left = 100, top = 400, right = 300, bottom = 600), imageHeight = 600, imageWidth = 1920)
+        assertEquals(11.25f * 0.6f + 5f * 0.4f, distance, 0.05f)
+    }
+
+    @Test
+    fun theSameBoxReadsCloserInASmallerFrame() {
+        // A pixel focal length is resolution dependent. The old constant ignored
+        // that, so a 640x360 video frame read ~3x farther than the same scene in
+        // a 1920-wide camera frame and the meter-based alarm never fired.
+        val wide = pipeline.estimateDistance(box(left = 100, top = 400, right = 300, bottom = 600), imageHeight = 600, imageWidth = 1920)
+        val narrow = pipeline.estimateDistance(box(left = 100, top = 400, right = 300, bottom = 600), imageHeight = 600, imageWidth = 640)
+        assertTrue("scaling the frame must not change the real-world estimate by 3x", narrow < wide * 1.5f)
+    }
+
+    @Test
+    fun frameWidthScalingIsMonotonic() {
+        val at640 = VehiclePipeline.focalLengthPixels(640)
+        val at1920 = VehiclePipeline.focalLengthPixels(1920)
+        assertEquals(500f, at640, 0.5f)
+        assertEquals(1500f, at1920, 0.5f)
+        assertTrue(at640 < at1920)
     }
 }

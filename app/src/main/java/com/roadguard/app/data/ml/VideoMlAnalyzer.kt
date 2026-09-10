@@ -339,7 +339,9 @@ class VideoMlAnalyzer(
         val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight, imageWidth)
         var closestVehicle: DetectedVehicle? = null
         if (candidate != null) {
-            val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight)
+            // The frame width decides the pixel focal length — see
+            // VehiclePipeline.focalLengthPixels.
+            val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight, imageWidth)
             closestVehicle = DetectedVehicle(candidate.boundingBox.toRect(), distance, candidate.label)
         }
 
@@ -517,15 +519,21 @@ class VideoMlAnalyzer(
     }
 
     private fun isSameTrackedVehicle(box: Rect): Boolean {
+        // Same containment rule as MlDetectionAnalyzer: centre proximity alone
+        // let a newly appearing nearer vehicle inherit the followed car's track.
         val previous = trackedBox ?: return false
         if (intersectionOverUnion(previous, box) > 0.15f) return true
         val dx = abs(previous.centerX() - box.centerX()).toFloat()
         val dy = abs(previous.centerY() - box.centerY()).toFloat()
         val tolerance = maxOf(previous.width(), previous.height(), box.width(), box.height()) * 0.35f
-        return dx < tolerance && dy < tolerance
+        val contained = box.left >= previous.left && box.right <= previous.right &&
+            box.top >= previous.top && box.bottom <= previous.bottom
+        return contained && dx < tolerance && dy < tolerance
     }
 
-    private fun estimateDistance(boundingBox: Rect, imageHeight: Int): Float {
+    /** Dead copy of the distance formula: [VehiclePipeline] is the only live path. */
+    @Suppress("unused")
+    private fun estimateDistanceUnused(boundingBox: Rect, imageHeight: Int): Float {
         val boxHeight = boundingBox.height().toFloat()
         val boxBottom = boundingBox.bottom.toFloat()
         

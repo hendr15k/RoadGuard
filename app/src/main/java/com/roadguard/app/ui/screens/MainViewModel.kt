@@ -58,6 +58,23 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Mirrors the pipeline's "no vehicle in frame" state. The analyzers clear
+     * their flow after >3 s without a detection and on a detector failure;
+     * dropping that null left the HUD rendering a frozen distance/TTC from the
+     * last car seen.
+     */
+    fun updateVehicleDistanceFrom(distance: VehicleDistance?) {
+        if (distance == null) {
+            viewModelScope.launch {
+                _vehicleDistance.value = null
+                reevaluate(nowMs = System.currentTimeMillis(), currentSettings = settings.value)
+            }
+        } else {
+            updateVehicleDistance(distance)
+        }
+    }
+
     fun updateSettings(settings: AppSettings) {
         viewModelScope.launch {
             updateSettingsUseCase(settings)

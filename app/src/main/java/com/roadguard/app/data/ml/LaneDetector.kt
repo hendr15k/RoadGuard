@@ -638,21 +638,24 @@ class LaneDetector(
         leftOriginal: LaneLine?,
         rightOriginal: LaneLine?
     ) {
-        leftPerspective?.let {
+        // valid=false placeholders (see calculateCenterOffset) must not poison
+        // the priors: their x lives in a different space than the perspective
+        // line the EMA expects.
+        leftPerspective?.takeIf { it.valid }?.let {
             mapPerspectiveToBev(it.x2, it.y2)?.first?.takeIf(Float::isFinite)?.let { bevX ->
                 expectedLeftXBev = if (expectedLeftXBev > 0f) expectedLeftXBev * 0.9f + bevX * 0.1f else bevX
             }
         }
-        rightPerspective?.let {
+        rightPerspective?.takeIf { it.valid }?.let {
             mapPerspectiveToBev(it.x2, it.y2)?.first?.takeIf(Float::isFinite)?.let { bevX ->
                 expectedRightXBev = if (expectedRightXBev > 0f) expectedRightXBev * 0.9f + bevX * 0.1f else bevX
             }
         }
-        leftOriginal?.let {
+        leftOriginal?.takeIf { it.valid }?.let {
             val avgX = (it.x1 + it.x2) / 2f
             expectedLeftX = if (expectedLeftX > 0f) expectedLeftX * 0.9f + avgX * 0.1f else avgX
         }
-        rightOriginal?.let {
+        rightOriginal?.takeIf { it.valid }?.let {
             val avgX = (it.x1 + it.x2) / 2f
             expectedRightX = if (expectedRightX > 0f) expectedRightX * 0.9f + avgX * 0.1f else avgX
         }
@@ -1552,13 +1555,20 @@ class LaneDetector(
             }
         }
 
-        return if (bestInliers.size >= 4) {
+        return if (bestInliers.size >= 5) {
             if (quadSupported) solvePolyFromFloat(bestInliers) else fitLinear(bestInliers)
+        } else if (bestInliers.size >= 3) {
+            // solvePolyFromFloat delegates to fitPolynomial, which needs 5 points
+            // and returns null for fewer — a 4-inlier set used to drop the lane
+            // even though a linear fit was available.
+            fitLinear(bestInliers)
         } else bestCoef
     }
 
     private fun solvePolyFromFloat(points: List<Pair<Float, Float>>): Triple<Float, Float, Float>? {
-        if (points.size < 4) return null
+        // Must match fitPolynomial's own minimum (5): a lower guard here only
+        // produced a deferred null.
+        if (points.size < 5) return null
         val ints = points.map { Pair(it.first.toInt(), it.second.toInt()) }
         return fitPolynomial(ints)
     }
@@ -1651,9 +1661,16 @@ class LaneDetector(
     private fun calculateCenterOffset(leftLane: LaneLine?, rightLane: LaneLine?, imgWidth: Int): Float {
         val vehicleCenter = imgWidth * vehicleCenterRatio
         
-        val leftX = leftLane?.let { (it.x1 + it.x2) / 2f } 
+        // Only a valid trace may be averaged in. A failed trace comes back as a
+        // placeholder with valid=false whose x is a BEV-space coordinate (or a
+        // bare fraction of the width) — averaging that with the other side's
+        // real line biased the offset, and at higher sensitivity it crossed the
+        // drift gate.
+        val validLeft = leftLane?.takeIf { it.valid }
+        val validRight = rightLane?.takeIf { it.valid }
+        val leftX = validLeft?.let { (it.x1 + it.x2) / 2f } 
             ?: (vehicleCenter - expectedLaneWidth / 2).takeIf { expectedLeftX <= 0 } ?: expectedLeftX
-        val rightX = rightLane?.let { (it.x1 + it.x2) / 2f } 
+        val rightX = validRight?.let { (it.x1 + it.x2) / 2f } 
             ?: (vehicleCenter + expectedLaneWidth / 2).takeIf { expectedRightX <= 0 } ?: expectedRightX
         
         val laneCenter = (leftX + rightX) / 2f
@@ -1661,12 +1678,13 @@ class LaneDetector(
     }
 
     private fun calculateLaneWidth(leftLane: LaneLine?, rightLane: LaneLine?): Float {
-        if (leftLane == null || rightLane == null) return expectedLaneWidth
-        
+        val left = leftLane?.takeIf { it.valid } ?: return expectedLaneWidth
+        val right = rightLane?.takeIf { it.valid } ?: return expectedLaneWidth
+
         val yRatio = 0.75f
-        val leftX = leftLane.x1 + (leftLane.x2 - leftLane.x1) * yRatio
-        val rightX = rightLane.x1 + (rightLane.x2 - rightLane.x1) * yRatio
-        
+        val leftX = left.x1 + (left.x2 - left.x1) * yRatio
+        val rightX = right.x1 + (right.x2 - right.x1) * yRatio
+
         return (rightX - leftX).coerceIn(80f, 500f)
     }
 

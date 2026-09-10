@@ -278,6 +278,11 @@ private fun DrawScope.drawEgoVehicle(
         val centerPath = Path()
         val yStart = leftCurve.yStart
         val yEnd = leftCurve.yEnd
+        // A zero (or inverted) span makes dy 0 and `y += dy` never terminates —
+        // on the main thread that is a permanent UI hang, not a missed draw.
+        // The two sibling loops (drawLaneArea, curveToCanvasPath) guard this;
+        // this one did not.
+        if (yEnd <= yStart) return
         val steps = 30
         val dy = (yEnd - yStart) / steps
         var y = yStart
