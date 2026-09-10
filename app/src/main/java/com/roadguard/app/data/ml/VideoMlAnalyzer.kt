@@ -60,6 +60,12 @@ class VideoMlAnalyzer(
     private var prevTime: Long = 0
     @Volatile
     private var trackedBox: Rect? = null
+    /** When the last frame carrying a detection was captured (frame time, not callback time). */
+    @Volatile
+    private var imageCapturedAtMs: Long = 0
+    /** When a detection was last processed — drives the "vehicle left the frame" gap check. */
+    @Volatile
+    private var vehicleSampleAtMs: Long = 0
     private val distanceHistory = ArrayDeque<Float>(5)
 
     // Camera parameters (approximate for typical smartphone)
@@ -219,9 +225,26 @@ class VideoMlAnalyzer(
                     } ?: com.roadguard.app.domain.model.LaneCurve()
                 } else {
                     val ufldOff = ufldCenterOffset(ufldResult, bitmap.width)
-                    val driftGate = 0.04f * (1.5f - laneSensitivity)
-                    finalIsDriftingLeft = ufldOff < -bitmap.width * driftGate && ufldResult.confidence > 0.4f
-                    finalIsDriftingRight = ufldOff > bitmap.width * driftGate && ufldResult.confidence > 0.4f
+                    // Same gate as the camera path ([MlDetectionAnalyzer]): a
+                    // stub side that the span gate rejected must not feed the
+                    // offset helper and trigger a warning for a lane the
+                    // overlay hides, and the mirror fallback is a guess.
+                    finalIsDriftingLeft = LaneDriftGate.isDriftingLeft(
+                        centerOffset = ufldOff,
+                        frameWidth = bitmap.width,
+                        sensitivity = laneSensitivity,
+                        confidence = ufldResult.confidence,
+                        leftCurveValid = leftOk,
+                        rightCurveValid = rightOk
+                    )
+                    finalIsDriftingRight = LaneDriftGate.isDriftingRight(
+                        centerOffset = ufldOff,
+                        frameWidth = bitmap.width,
+                        sensitivity = laneSensitivity,
+                        confidence = ufldResult.confidence,
+                        leftCurveValid = leftOk,
+                        rightCurveValid = rightOk
+                    )
                     finalConfidence = ufldResult.confidence
                     finalCenterOffset = ufldOff
                     finalLaneWidth = ufldLaneWidth(ufldResult)
@@ -298,7 +321,7 @@ class VideoMlAnalyzer(
             synchronized(detectorLock) {
                 // `return` here would skip the finally and leak the bitmap.
                 if (!closed) {
-                    detectVehicles(inputImage, bitmap, height, bitmap.width)
+                    detectVehicles(inputImage, bitmap, height, bitmap.width, currentTime)
                     handedToMlKit = true
                 }
             }
@@ -309,7 +332,7 @@ class VideoMlAnalyzer(
         }
     }
 
-    private fun detectVehicles(inputImage: InputImage, bitmapToRecycle: Bitmap, imageHeight: Int, imageWidth: Int) {
+    private fun detectVehicles(inputImage: InputImage, bitmapToRecycle: Bitmap, imageHeight: Int, imageWidth: Int, capturedAtMs: Long) {
         objectDetector.process(inputImage)
             .addOnSuccessListener { detectedObjects ->
                 // Serialize with close() and other in-flight callbacks: frames
@@ -317,7 +340,7 @@ class VideoMlAnalyzer(
                 // state below is mutated from callback threads.
                 synchronized(detectorLock) {
                     if (closed) return@addOnSuccessListener
-                    processVehicleResult(detectedObjects, imageHeight, imageWidth)
+                    processVehicleResult(detectedObjects, imageHeight, imageWidth, capturedAtMs)
                 }
             }
             .addOnFailureListener {
@@ -342,8 +365,10 @@ class VideoMlAnalyzer(
     private fun processVehicleResult(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
         imageHeight: Int,
-        imageWidth: Int
+        imageWidth: Int,
+        capturedAtMs: Long
     ) {
+        imageCapturedAtMs = capturedAtMs
         // Delegates label- vs geometry-fallback to the JVM-tested VehiclePipeline.
         // The base ML Kit model never emits Vehicle/Car labels (only
         // fashion/food/home/plants/places), so geometry fallback is required.
@@ -364,6 +389,7 @@ class VideoMlAnalyzer(
 
         if (closestVehicle != null) {
             val currentTime = System.currentTimeMillis()
+            vehicleSampleAtMs = currentTime
             if (!isSameTrackedVehicle(closestVehicle.boundingBox)) {
                 distanceHistory.clear()
                 prevDistance = null
@@ -386,11 +412,14 @@ class VideoMlAnalyzer(
                 isTooClose = smoothedDistance < vehicleThreshold || ttc < 2.5f,
                 timeToCollision = ttc,
                 relativeSpeed = relativeSpeed,
-                timestamp = currentTime
+                // The FRAME's capture time, not the ML Kit callback instant: the
+                // whole point of the timestamp is to expire detections whose
+                // frames stopped arriving (paused video / stalled pipeline), and
+                // a callback that lands late must not refresh that.
+                timestamp = imageCapturedAtMs
             )
         } else {
-            val currentTime = System.currentTimeMillis()
-            val gapSec = if (prevTime > 0) (currentTime - prevTime) / 1000f else 0f
+            val gapSec = if (vehicleSampleAtMs > 0L) (System.currentTimeMillis() - vehicleSampleAtMs) / 1000f else 0f
             if (gapSec > 1.5f) {
                 distanceHistory.clear()
             }

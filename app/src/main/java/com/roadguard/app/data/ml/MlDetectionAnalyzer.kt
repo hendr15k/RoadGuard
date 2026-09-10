@@ -71,6 +71,12 @@ class MlDetectionAnalyzer(
     private var prevTime: Long = 0
     @Volatile
     private var trackedBox: Rect? = null
+    /** When the last frame carrying a detection was captured (frame time, not callback time). */
+    @Volatile
+    private var imageCapturedAtMs: Long = 0
+    /** When a detection was last processed — drives the "vehicle left the frame" gap check. */
+    @Volatile
+    private var vehicleSampleAtMs: Long = 0
     // Only ever touched from the single analyzer thread (analyze() is called
     // serially for one ImageAnalysis use case), unlike the @Volatile fields
     // above which are also read from ML Kit's callback thread.
@@ -263,14 +269,34 @@ class MlDetectionAnalyzer(
                 // invalid and are hidden instead of floating in the sky.
                 val ufldCurves = ufldCurvesToDomain(ufldResult!!, uprightHeight)
                 val ufldOff = ufldCenterOffset(ufldResult, uprightWidth)
-                val driftGate = 0.04f * (1.5f - laneSensitivity)
-                finalIsDriftingLeft = ufldOff < -uprightWidth * driftGate && ufldResult.confidence > 0.4f
-                finalIsDriftingRight = ufldOff > uprightWidth * driftGate && ufldResult.confidence > 0.4f
+                val leftOk = ufldCurves.first.valid
+                val rightOk = ufldCurves.second.valid
+                // A departure warning needs a complete, confident pair: a stub
+                // side (span-gated to invalid) would otherwise still feed the
+                // offset helper its sky-high bottom point and alarm for a lane
+                // the overlay refuses to draw; the single-lane mirror is a
+                // guess and is capped below this floor for that reason.
+                finalIsDriftingLeft = LaneDriftGate.isDriftingLeft(
+                    centerOffset = ufldOff,
+                    frameWidth = uprightWidth,
+                    sensitivity = laneSensitivity,
+                    confidence = ufldResult.confidence,
+                    leftCurveValid = leftOk,
+                    rightCurveValid = rightOk
+                )
+                finalIsDriftingRight = LaneDriftGate.isDriftingRight(
+                    centerOffset = ufldOff,
+                    frameWidth = uprightWidth,
+                    sensitivity = laneSensitivity,
+                    confidence = ufldResult.confidence,
+                    leftCurveValid = leftOk,
+                    rightCurveValid = rightOk
+                )
                 finalConfidence = ufldResult.confidence
                 finalCenterOffset = ufldOff
                 finalLaneWidth = ufldLaneWidth(ufldResult)
-                leftVisible = ufldResult.left != null && ufldCurves.first.valid
-                rightVisible = ufldResult.right != null && ufldCurves.second.valid
+                leftVisible = ufldResult.left != null && leftOk
+                rightVisible = ufldResult.right != null && rightOk
                 leftCurve = ufldCurves.first
                 rightCurve = ufldCurves.second
             } else {
@@ -315,7 +341,7 @@ class MlDetectionAnalyzer(
                     imageProxy.close()
                     return
                 }
-                detectVehicles(inputImage, imageProxy, uprightHeight, uprightWidth)
+                detectVehicles(inputImage, imageProxy, uprightHeight, uprightWidth, currentTime)
             }
         } catch (e: Exception) {
             // Wenn der synchrone Teil (LaneDetector etc.) crasht, müssen wir
@@ -520,7 +546,7 @@ class MlDetectionAnalyzer(
     }
 
     @SuppressLint("UnsafeOptInUsageError")
-    private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy, uprightImageHeight: Int, uprightImageWidth: Int) {
+    private fun detectVehicles(inputImage: InputImage, imageProxy: ImageProxy, uprightImageHeight: Int, uprightImageWidth: Int, capturedAtMs: Long) {
         // close() läuft IMMER im onCompleteListener, nie synchron davor.
         // So vermeiden wir "trying to use closed ImageProxy"-Crashes, die
         // auftreten, wenn ML Kit noch auf die underlying mediaImage-Buffer
@@ -532,7 +558,7 @@ class MlDetectionAnalyzer(
                 // state below is mutated from callback threads.
                 synchronized(detectorLock) {
                     if (closed) return@addOnSuccessListener
-                    processVehicleResult(detectedObjects, uprightImageHeight, uprightImageWidth)
+                    processVehicleResult(detectedObjects, uprightImageHeight, uprightImageWidth, capturedAtMs)
                 }
             }
             .addOnFailureListener {
@@ -559,8 +585,10 @@ class MlDetectionAnalyzer(
     private fun processVehicleResult(
         detectedObjects: List<com.google.mlkit.vision.objects.DetectedObject>,
         imageHeight: Int,
-        imageWidth: Int
+        imageWidth: Int,
+        capturedAtMs: Long
     ) {
+        imageCapturedAtMs = capturedAtMs
         // Delegates label- vs geometry-fallback to the JVM-tested VehiclePipeline.
         // The base ML Kit model never emits Vehicle/Car labels (only
         // fashion/food/home/plants/places), so geometry fallback is required.
@@ -581,6 +609,7 @@ class MlDetectionAnalyzer(
 
         if (closestVehicle != null) {
             val currentTime = System.currentTimeMillis()
+            vehicleSampleAtMs = currentTime
             // Do not blend distance/TTC across different objects. Switching from
             // a far car to a nearer truck otherwise looks like impossible closing
             // speed and immediately triggers a collision warning.
@@ -607,7 +636,10 @@ class MlDetectionAnalyzer(
                 isTooClose = smoothedDistance < vehicleThreshold || ttc < 2.5f,
                 timeToCollision = ttc,
                 relativeSpeed = relativeSpeed,
-                timestamp = currentTime
+                // The FRAME's capture time, not the ML Kit callback instant: the
+                // alert gate expires a distance sample by this value, and a
+                // callback that lands late (busy device) must not refresh it.
+                timestamp = imageCapturedAtMs
             )
         } else {
             // Kein Vehicle in diesem Frame. prevTime wird BEWUSST nicht
@@ -616,7 +648,7 @@ class MlDetectionAnalyzer(
             // kein Vehicle erkannt wird, soll die History gecleart
             // werden, um stale Distanzen zu verwerfen.
             val currentTime = System.currentTimeMillis()
-            val gapSec = if (prevTime > 0) (currentTime - prevTime) / 1000f else 0f
+            val gapSec = if (vehicleSampleAtMs > 0L) (currentTime - vehicleSampleAtMs) / 1000f else 0f
             if (gapSec > 1.5f) {
                 distanceHistory.clear()
             }
