@@ -29,7 +29,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -73,20 +72,28 @@ fun MainScreen(
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPicker by remember { mutableStateOf(false) }
     val appContext = context.applicationContext
-    // A key that changes with the configuration: `remember(videoUri)` alone
-    // survived a rotation, so the analyzer (and its tensor sessions) was
-    // re-created by the new composition while the old one stayed alive
-    // forever — the DisposableEffect never disposed it.
-    val uiMode = LocalConfiguration.current.uiMode
+    // Keys: videoUri only. Do NOT add a configuration key here: the manifest
+    // declares configChanges="orientation|screenSize|...", so the composition
+    // (and this remember state) survives rotation. Re-creating the analyzer on
+    // rotation would leave VideoPreview's frame loop — which is started in a
+    // DisposableEffect keyed on exoPlayer and captures the analyzer by value —
+    // feeding an already-closed analyzer, silently killing video detection.
     // VideoMlAnalyzer wird nur erzeugt wenn der User tatsächlich ein Video
     // auswählt. Frühere Implementierung erzeugte ihn immer (und damit
     // ObjectDetector + TFLite Interpreter + Speicher), auch im Live-Modus.
-    val videoAnalyzer = remember(videoUri, uiMode) {
+    val videoAnalyzer = remember(videoUri) {
         if (videoUri != null) VideoMlAnalyzer(appContext = appContext) else null
     }
-    // Own scope so the async close() can be cancelled again: a fire-and-forget
-    // CoroutineScope leaked for the lifetime of the process on every rotation.
+    // One long-lived scope for the async close(). The previous version created a
+    // fresh CoroutineScope per disposal (one leaked scope per video switch).
+    // NOTE: this effect must stay declared BEFORE the analyzer effect below:
+    // Compose disposes remember-observers in reverse declaration order, so the
+    // scope has to be cancelled last — otherwise the close() launched in the
+    // analyzer effect's onDispose would be dropped.
     val analyzerScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
+    DisposableEffect(analyzerScope) {
+        onDispose { analyzerScope.cancel() }
+    }
     DisposableEffect(videoAnalyzer) {
         onDispose {
             val analyzer = videoAnalyzer ?: return@onDispose
@@ -97,10 +104,6 @@ fun MainScreen(
             }
         }
     }
-    DisposableEffect(analyzerScope) {
-        onDispose { analyzerScope.cancel() }
-    }
-
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val alertState by viewModel.alertState.collectAsState()

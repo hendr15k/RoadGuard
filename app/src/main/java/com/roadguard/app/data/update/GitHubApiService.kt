@@ -94,23 +94,8 @@ class GitHubApiService @Inject constructor(
     }
 
     suspend fun getLatestApkUrl(): Result<String> = withContext(Dispatchers.IO) {
-        getLatestRelease().map { release ->
-            // Inline asset URL: /releases/download/<tag>/<file>. Asset.downloadUrl
-            // as API-fetched used to be pasted from a release the tag of which
-            // did not match the file, so the URL 404'd; building it from tag +
-            // asset name keeps them consistent.
-            //
-            // NOTE: Android cannot install from here anyway — ACTION_VIEW on an
-            // APK URL opens a browser/downloader and the user still has to allow
-            // install-from-unknown-sources. Reported as "left" rather than
-            // pretending there is an in-app install path.
-            val asset = release.assets.firstOrNull { it.name.endsWith(".apk") }
-            val tag = release.tagName
-            if (asset != null && tag.isNotBlank()) {
-                "https://github.com/hendr15k/RoadGuard/releases/download/$tag/${asset.name}"
-            } else {
-                release.htmlUrl
-            }
-        }
+        // Unused: the update banner opens release.htmlUrl. Kept minimal rather
+        // than dressed up as a fix (see the PR's "left" list).
+        getLatestRelease().map { release -> release.htmlUrl }
     }
 }

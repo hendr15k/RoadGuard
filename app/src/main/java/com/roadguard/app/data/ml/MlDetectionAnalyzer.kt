@@ -94,8 +94,6 @@ class MlDetectionAnalyzer(
      * hazard open forever. The sample therefore carries the frame's capture
      * time and is only published when it changed.
      */
-    @Volatile
-    private var lastLaneStampMs = 0L
     private companion object {
         /** Minimum gap between UFLD (re-)load attempts. */
         private const val UFLD_RETRY_COOLDOWN_MS = 30_000L
@@ -303,13 +301,12 @@ class MlDetectionAnalyzer(
                 imageHeight = swResult.imageHeight,
                 timestamp = currentTime
             )
-            // At most one sample per processed frame: repeated identical
-            // emissions would re-stamp the gate with "now" and hold a hazard
-            // open forever.
-            if (currentTime != lastLaneStampMs) {
-                lastLaneStampMs = currentTime
-                _laneInfo.value = laneSample
-            }
+            // The sample carries the frame's capture time (the default stamp
+            // would be the emission instant, which is the same here since this
+            // runs on the analysis thread). No same-millisecond guard: the
+            // 200 ms throttle above already guarantees one distinct stamp per
+            // processed frame, so such a guard would be unreachable.
+            _laneInfo.value = laneSample
 
             // Close must be serialized with a frame still in process: closing
             // the detector mid-frame crashes ("Cannot use closed Detector").

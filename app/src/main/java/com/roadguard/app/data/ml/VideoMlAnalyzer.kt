@@ -77,8 +77,6 @@ class VideoMlAnalyzer(
      * the alert gate with "now" and held a stale hazard open forever. The
      * sample therefore carries the frame's capture time.
      */
-    @Volatile
-    private var lastLaneStampMs = 0L
 
     init {
         // Only construct the runners here; loading maps the model and builds the
@@ -118,6 +116,21 @@ class VideoMlAnalyzer(
             bitmap.recycle()
             return
         }
+        // The whole frame — lane inference included — is serialized with
+        // close(): the lane/TFLite work runs off the ML Kit callback, so a
+        // rotation disposing the interpreter mid-detect() would otherwise be a
+        // native use-after-free. The bitmap is handed to ML Kit from inside the
+        // same lock, so it stays alive across the hand-off.
+        synchronized(detectorLock) {
+            if (closed) {
+                bitmap.recycle()
+                return
+            }
+            analyzeFrameLocked(bitmap, height)
+        }
+    }
+
+    private fun analyzeFrameLocked(bitmap: Bitmap, height: Int) {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastProcessTime < processInterval) {
             bitmap.recycle()
@@ -272,12 +285,16 @@ class VideoMlAnalyzer(
                 imageHeight = refH,
                 timestamp = currentTime
             )
-            if (currentTime != lastLaneStampMs) {
-                lastLaneStampMs = currentTime
-                _laneInfo.value = laneSample
-            }
+            // timestamp = the FRAME's capture time, not the emission instant:
+            // for a paused video the frame can be re-analysed seconds after it
+            // was captured, and the alert gate expires samples by this value.
+            // No same-millisecond guard: the 200 ms throttle already yields one
+            // distinct stamp per processed frame.
+            _laneInfo.value = laneSample
 
             val inputImage = InputImage.fromBitmap(bitmap, 0)
+            // Already inside detectorLock (see analyzeFrame); the re-entrant
+            // monitor keeps the existing nesting harmless.
             synchronized(detectorLock) {
                 // `return` here would skip the finally and leak the bitmap.
                 if (!closed) {

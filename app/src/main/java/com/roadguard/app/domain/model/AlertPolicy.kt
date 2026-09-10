@@ -50,8 +50,16 @@ class AlertPolicy {
          * 25 m/s keeps that flag set for minutes: it outranked a simultaneous
          * lane departure and escalated to the urgent collision pattern without
          * ever being near.
+         *
+         * The user's own following-distance setting (10..50 m) extends the
+         * range, so a configured 40/50 m warning is not silently overridden —
+         * see [collisionRangeFor].
          */
         const val COLLISION_TTC_RANGE_M = 30f
+
+        /** Effective collision range: never below the user's own threshold. */
+        fun collisionRangeFor(settings: AppSettings): Float =
+            maxOf(COLLISION_TTC_RANGE_M, settings.minFollowingDistanceMeters)
 
         /** After this many repeats a sustained collision escalates to urgent. */
         const val ESCALATION_REPEATS = 3
@@ -158,7 +166,8 @@ class AlertPolicy {
         if (nowMs - distance.timestamp > STALE_MS) return null
         // isTooClose also covers a merely fast-closing vehicle (ttc < 2.5 s)
         // that is still far away; only a genuinely close one is a collision.
-        if (distance.distanceMeters > COLLISION_TTC_RANGE_M) return null
+        // The user's following-distance setting raises the range.
+        if (distance.distanceMeters > collisionRangeFor(settings)) return null
         return WarningType.ForwardCollision
     }
 

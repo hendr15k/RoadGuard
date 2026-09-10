@@ -63,19 +63,13 @@ android {
 // stays source-only (see .gitignore).
 val ufldModelFile = layout.projectDirectory.file("src/main/assets/ufld_tusimple_float16.tflite")
 val downloadUfldModel by tasks.registering(Exec::class) {
-    description = "Fetch the bundled UFLD model (skipped when present)"
-    commandLine(
-        "sh", "-c",
-        // -f: without it curl writes the 404/HTML error body into the asset and
-        // the APK ships a ~200 byte "model" that TFLite rejects at runtime with
-        // a green build. The size check catches a truncated download too.
-        "if [ ! -f src/main/assets/ufld_tusimple_float16.tflite ]; then " +
-            "curl -fsSL -o src/main/assets/ufld_tusimple_float16.tflite " +
-            "https://github.com/hendr15k/RoadGuard/releases/download/v1.0.50-models/ufld_tusimple_float16.tflite && " +
-            "if [ \"$(wc -c < src/main/assets/ufld_tusimple_float16.tflite)\" -lt 10000000 ]; then " +
-            "echo 'UFLD model download incomplete' >&2; " +
-            "rm -f src/main/assets/ufld_tusimple_float16.tflite; exit 1; fi; fi"
-    )
+    description = "Fetch the bundled UFLD model (validates size, skipped when present)"
+    // The logic lives in tools/fetch_ufld_model.sh (resolved relative to this
+    // module: Exec runs with the module dir as cwd). It validates an
+    // already-present file too — a curl killed mid-transfer leaves a truncated
+    // file behind and its non-zero exit short-circuits any `&&` chain, so an
+    // existence-only guard accepted that file on every later build.
+    commandLine("bash", "tools/fetch_ufld_model.sh")
     outputs.file(ufldModelFile)
 }
 tasks.matching { it.name.startsWith("pre") && it.name.endsWith("Build") }.configureEach {
