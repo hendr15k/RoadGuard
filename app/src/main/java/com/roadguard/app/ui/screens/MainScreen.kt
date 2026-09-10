@@ -142,7 +142,7 @@ fun MainScreen(
         val analyzer = videoAnalyzer ?: return@LaunchedEffect
         kotlinx.coroutines.coroutineScope {
             launch { analyzer.laneInfo.collect { info -> info?.let { viewModel.updateLaneInfo(it) } } }
-            launch { analyzer.vehicleDistance.collect { d -> d?.let { viewModel.updateVehicleDistance(it) } } }
+            launch { analyzer.vehicleDistance.collect { d -> viewModel.updateVehicleDistanceFrom(d) } }
         }
     }
 
@@ -200,7 +200,8 @@ fun MainScreen(
                     onLaneUpdate = viewModel::updateLaneInfo,
                     onDistanceUpdate = viewModel::updateVehicleDistance,
                     appContext = appContext,
-                    settings = settings
+                    settings = settings,
+                    onDistanceUpdateFrom = viewModel::updateVehicleDistanceFrom
                 )
 
                 LaneOverlay(
@@ -279,7 +280,8 @@ fun CameraPreview(
     onLaneUpdate: (com.roadguard.app.domain.model.LaneInfo) -> Unit,
     onDistanceUpdate: (com.roadguard.app.domain.model.VehicleDistance) -> Unit,
     appContext: Context? = null,
-    settings: com.roadguard.app.domain.model.AppSettings
+    settings: com.roadguard.app.domain.model.AppSettings,
+    onDistanceUpdateFrom: (com.roadguard.app.domain.model.VehicleDistance?) -> Unit = { it?.let(onDistanceUpdate) }
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -307,7 +309,7 @@ fun CameraPreview(
     LaunchedEffect(mlAnalyzer) {
         kotlinx.coroutines.coroutineScope {
             launch { mlAnalyzer.laneInfo.collect { laneInfo -> laneInfo?.let { onLaneUpdate(it) } } }
-            launch { mlAnalyzer.vehicleDistance.collect { d -> d?.let { onDistanceUpdate(it) } } }
+            launch { mlAnalyzer.vehicleDistance.collect { d -> onDistanceUpdateFrom(d) } }
         }
     }
 
@@ -510,9 +512,14 @@ fun StatusBar(
         // Lane Status — warnt nur wenn das Gate ACTIVE ist, nicht bei jedem raw drift
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("LANE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-            val laneText = when (activeType) {
-                is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight -> "WARN"
-                else -> if (laneInfo == null) "--" else "OK"
+            val laneText = when {
+                activeType is WarningType.LaneDepartureLeft || activeType is WarningType.LaneDepartureRight -> "WARN"
+                // The gate drops a sample below MIN_LANE_CONFIDENCE without any
+                // warning, so reporting "OK" here claimed a healthy lane the
+                // safety system had actually decided to ignore.
+                laneInfo == null -> "--"
+                laneInfo.confidence < AlertPolicy.MIN_LANE_CONFIDENCE -> "??"
+                else -> "OK"
             }
             val laneColor = when (activeType) {
                 is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight -> WarningYellow

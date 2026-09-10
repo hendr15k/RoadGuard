@@ -576,7 +576,9 @@ class MlDetectionAnalyzer(
         val candidate = vehiclePipeline.selectClosestVehicle(detections, imageHeight, imageWidth)
         var closestVehicle: DetectedVehicle? = null
         if (candidate != null) {
-            val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight)
+            // The frame width decides the pixel focal length — see
+            // VehiclePipeline.focalLengthPixels.
+            val distance = vehiclePipeline.estimateDistance(candidate.boundingBox, imageHeight, imageWidth)
             closestVehicle = DetectedVehicle(candidate.boundingBox.toRect(), distance, candidate.label)
         }
 
@@ -650,7 +652,10 @@ class MlDetectionAnalyzer(
 
     /**
      * A fast-approaching vehicle's box grows quickly, so plain IoU drops it and
-     * suppresses the TTC exactly when it matters. Fall back to centre proximity.
+     * suppresses the TTC exactly when it matters. Fall back to centre proximity
+     * — but only while the new box does not leave the previous one: a nearer
+     * vehicle entering the frame also sits near the centre, and inheriting that
+     * track blended two objects' distances.
      */
     private fun isSameTrackedVehicle(box: Rect): Boolean {
         val previous = trackedBox ?: return false
@@ -658,10 +663,14 @@ class MlDetectionAnalyzer(
         val dx = abs(previous.centerX() - box.centerX()).toFloat()
         val dy = abs(previous.centerY() - box.centerY()).toFloat()
         val tolerance = maxOf(previous.width(), previous.height(), box.width(), box.height()) * 0.35f
-        return dx < tolerance && dy < tolerance
+        val contained = box.left >= previous.left && box.right <= previous.right &&
+            box.top >= previous.top && box.bottom <= previous.bottom
+        return contained && dx < tolerance && dy < tolerance
     }
 
-    private fun estimateDistance(boundingBox: Rect, imageHeight: Int): Float =
+    /** Dead copy of the distance formula: [VehiclePipeline] is the only live path. */
+    @Suppress("unused")
+    private fun estimateDistanceUnused(boundingBox: Rect, imageHeight: Int): Float =
         vehiclePipeline.estimateDistance(VehicleBox(boundingBox.left, boundingBox.top, boundingBox.right, boundingBox.bottom), imageHeight)
 
     private fun calculateTimeToCollision(currentDistance: Float, currentTime: Long): Float {
