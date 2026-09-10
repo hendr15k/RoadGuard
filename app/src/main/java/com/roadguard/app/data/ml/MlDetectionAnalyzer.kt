@@ -251,7 +251,8 @@ class MlDetectionAnalyzer(
                     e.printStackTrace()
                 }
             }
-            val ufldOk = ufldResult != null && (ufldResult.left != null || ufldResult.right != null)
+            val ufldOk = ufld != null && ufldResult != null &&
+                (ufldResult.left != null || ufldResult.right != null)
 
             val finalIsDriftingLeft: Boolean
             val finalIsDriftingRight: Boolean
@@ -268,7 +269,13 @@ class MlDetectionAnalyzer(
                 // Span-gated like the video path: stub sides come back
                 // invalid and are hidden instead of floating in the sky.
                 val ufldCurves = ufldCurvesToDomain(ufldResult!!, uprightHeight)
-                val ufldOff = ufldCenterOffset(ufldResult, uprightWidth)
+                // Offset from the detector: both boundaries evaluated at ONE
+                // row, then the temporal median — the raw per-frame value
+                // jitters by more than the drift window on a straight road.
+                val smoothedOff = ufld!!.smoothedOffset(ufldResult.offsetPx)
+                val ufldOff = smoothedOff
+                val historyLen = ufld.offsetHistorySize()
+                val laneWidthPx = ufld.measuredLaneWidthPx()
                 val leftOk = ufldCurves.first.valid
                 val rightOk = ufldCurves.second.valid
                 // A departure warning needs a complete, confident pair: a stub
@@ -282,7 +289,9 @@ class MlDetectionAnalyzer(
                     sensitivity = laneSensitivity,
                     confidence = ufldResult.confidence,
                     leftCurveValid = leftOk,
-                    rightCurveValid = rightOk
+                    rightCurveValid = rightOk,
+                    historySize = historyLen,
+                    laneWidth = laneWidthPx
                 )
                 finalIsDriftingRight = LaneDriftGate.isDriftingRight(
                     centerOffset = ufldOff,
@@ -290,11 +299,13 @@ class MlDetectionAnalyzer(
                     sensitivity = laneSensitivity,
                     confidence = ufldResult.confidence,
                     leftCurveValid = leftOk,
-                    rightCurveValid = rightOk
+                    rightCurveValid = rightOk,
+                    historySize = historyLen,
+                    laneWidth = laneWidthPx
                 )
                 finalConfidence = ufldResult.confidence
                 finalCenterOffset = ufldOff
-                finalLaneWidth = ufldLaneWidth(ufldResult)
+                finalLaneWidth = laneWidthPx.takeIf { it > 1f } ?: ufldLaneWidth(ufldResult)
                 leftVisible = ufldResult.left != null && leftOk
                 rightVisible = ufldResult.right != null && rightOk
                 leftCurve = ufldCurves.first
@@ -454,18 +465,6 @@ class MlDetectionAnalyzer(
             }
         }
         return xAtMaxY
-    }
-
-    private fun ufldCenterOffset(res: UfldLaneDetector.UfldResult, imgW: Int): Float {
-        val lx = ufldLaneCenterX(res.left)
-        val rx = ufldLaneCenterX(res.right)
-        val vehicleCenter = imgW * 0.5f
-        return when {
-            lx != null && rx != null -> vehicleCenter - (lx + rx) / 2f
-            lx != null -> vehicleCenter - lx - 150f
-            rx != null -> vehicleCenter - rx + 150f
-            else -> 0f
-        }
     }
 
     private fun ufldLaneWidth(res: UfldLaneDetector.UfldResult): Float {

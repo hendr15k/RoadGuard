@@ -10,23 +10,54 @@ import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Ultra-Fast-Lane-Detection (TuSimple) as the primary lane source.
  *
- * The old pipeline (classic CV histogram peaks + DeepLab fallback) picked the
+ * The classic pipeline (histogram peaks + DeepLab fallback) locked onto the
  * OUTER marking on multi-lane roads and the DeepLab model collapsed to
  * all-background on dashcam footage (verified freeRatio == 1.00 on all
  * scenes). UFLD outputs up to 4 lanes as row-anchored points directly, so the
- * ego pair (lanes 1+2) is selected by geometry instead of peak hunting.
+ * ego pair is selected by geometry instead of peak hunting.
  *
- * Validated via a Python port on 5 dashcam clips (solidWhiteRight,
- * solidYellowLeft, challenge, project_video, harder_challenge): both-rate
- * 1.00 on 4/5, 0.997 on the mountain clip; QA overlays sit on the markings.
+ * ## v2 — what the first UFLD integration still got wrong
  *
- * Model: ufld_tusimple_float16.tflite (float16-quant, ~122 MB), downloaded on
- * demand via [ModelDownloader] into filesDir/roadguard_models — NOT bundled,
- * the APK would triple. Input [1,288,800,3] float32, ImageNet-normalized.
+ * Measured with the Python port over 11 clips (5 standard + 6 real-world:
+ * curvy highway, shadow, traffic, night, rain, city). `dx` is the median
+ * signed distance between the drawn curve and the nearest marking pixel, so
+ * 0 means the line lies exactly on the paint.
+ *
+ *  1. **Point count is not evidence.** Confidence was
+ *     `0.4 + min(1, points/56 * 1.5) * 0.55`: a clean 30-point polyline scored
+ *     0.85+ regardless of how much of the frame it covered or whether it sat
+ *     on paint — and that number fed the alert gate directly. Replaced by
+ *     [LaneGeometry.coverage] x marking support x pair plausibility.
+ *  2. **The two boundaries were compared at two different rows.** Each side
+ *     used its own lowest point; for pixels x = c*y^2/(2f) that is an error of
+ *     roughly c*dy/f. Measured dx -10.2 px on project_video, -14.6 px on
+ *     harder_challenge, and only -1.6 px on the straight solidWhiteRight —
+ *     i.e. a curve-dependent bias that looked like a real lane departure.
+ *     Both sides are now evaluated at ONE row ([LaneGeometry.evalRow]).
+ *  3. **The model's own ~10 px bias was ignored** (dx -10.7 px on challenge,
+ *     stable over the clip). The fitted curve is re-anchored to the actual
+ *     paint when that increases marking support: dx -> -2.6 px.
+ *  4. **The ego width prior could collapse.** The median over ALL decoded
+ *     lanes mixes a real lane gap with the gap across a lane the model
+ *     missed; on solidWhiteRight it drove the prior from 387 px into the
+ *     0.15*W clamp. [EgoLaneGeometry] uses only index-adjacent lanes and
+ *     limits the per-frame step.
+ *  5. **The mirror fallback was a hard-coded 0.45*frameWidth/2** and could not
+ *     be distinguished from a measurement downstream. It now uses the
+ *     measured width and is capped below the alert floor.
+ *  6. **Departure warnings fired while driving straight** (16-53 % of frames on
+ *     some clips) because the per-frame offset noise is several pixels and the
+ *     threshold sat right on it. The decision now uses a temporal median.
+ *
+ * Model: ufld_tusimple_float16.tflite (float16-quant, ~122 MB), bundled as an
+ * asset in the release build AND downloadable via [ModelDownloader] into
+ * filesDir/roadguard_models. Input [1,288,800,3] float32, ImageNet-normalized.
  * Output [1,101,56,4] (griding x row-anchors x lanes).
  */
 class UfldLaneDetector(private val context: Context) {
@@ -38,7 +69,8 @@ class UfldLaneDetector(private val context: Context) {
         const val GRIDING_NUM = 100
         const val NUM_ROWS = 56
         const val NUM_LANES = 4
-        // TuSimple row anchors in 288px model space, bottom-up.
+
+        /** TuSimple row anchors in 288px model space, bottom-up. */
         val ROW_ANCHORS = intArrayOf(
             64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112,
             116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164,
@@ -48,15 +80,51 @@ class UfldLaneDetector(private val context: Context) {
         )
         const val CFG_W = 1280f
         const val CFG_H = 720f
-        private const val MIN_GAP_FRac = 0.22f
-        private const val MAX_GAP_FRac = 0.85f
         private const val MIN_POINTS = 3
         private const val HOLD_FRAMES = 6
         private const val EMA_ALPHA = 0.6f
+
+        /**
+         * Ceiling for a sample whose second boundary was mirrored from the
+         * first. Must stay below the alert floor (0.4): a guessed boundary is
+         * good enough to draw, never good enough to warn.
+         */
+        const val MIRROR_CONFIDENCE_CAP = 0.39f
+
+        /** Confidence for a held (last-known) sample: drawable, not warnable. */
+        private const val HOLD_CONFIDENCE = 0.35f
+
+        /** Offset median window in samples (~1.4 s at the 5 Hz analyzer rate). */
+        private const val OFFSET_MEDIAN_N = 7
+        private const val OFFSET_MEDIAN_MIN = 3
     }
 
-    data class LanePoints(val x: FloatArray, val y: FloatArray) {
+    data class LanePoints(val x: FloatArray, val y: FloatArray, val index: Int = 0) {
         val size: Int get() = x.size
+
+        /** Lowest row the model decoded — the only point that is ground contact. */
+        val yBottom: Float
+            get() {
+                var v = Float.NEGATIVE_INFINITY
+                for (yi in y) if (yi > v) v = yi
+                return v
+            }
+
+        /** Highest decoded row (far field). */
+        val yTop: Float
+            get() {
+                var v = Float.POSITIVE_INFINITY
+                for (yi in y) if (yi < v) v = yi
+                return v
+            }
+
+        /** x on the lowest decoded row. */
+        val xBottom: Float
+            get() {
+                var best = 0
+                for (i in y.indices) if (y[i] > y[best]) best = i
+                return x[best]
+            }
     }
 
     private var interpreter: Interpreter? = null
@@ -66,6 +134,7 @@ class UfldLaneDetector(private val context: Context) {
     private var nnApiDelegate: org.tensorflow.lite.Delegate? = null
     private var cachedInput: ByteBuffer? = null
     private var cachedOutput: ByteBuffer? = null
+
     /** Which execution path the interpreter actually uses (for diagnostics). */
     var activeBackend: String = "none"
         private set
@@ -74,6 +143,28 @@ class UfldLaneDetector(private val context: Context) {
     private val emaState = mutableMapOf<String, LanePoints>()
     private val emaFrame = mutableMapOf<String, Long>()
     private var frameCounter = 0L
+
+    /** Ego-lane width learning + pair selection (unit tested). */
+    private val egoGeometry = EgoLaneGeometry()
+
+    /** Paint measurement and curve re-anchoring. */
+    private val markingMeasurer = LaneOverlayRenderer()
+
+    /** Temporal median of the ego offset, in image pixels. */
+    private val offsetHistory = ArrayDeque<Float>()
+
+    /** Marking support of the last processed frame, per side (0..1). */
+    private var leftSupport: Float = 1f
+    private var rightSupport: Float = 1f
+
+    /** Last applied paint correction per side, in image px (diagnostics). */
+    var lastShiftLeft: Float = 0f
+        private set
+    var lastShiftRight: Float = 0f
+        private set
+
+    /** Offset of the last real sample, so a hold does not report "centred". */
+    private var currentOffset: Float = 0f
 
     @Synchronized
     fun isLoaded(): Boolean = interpreter != null
@@ -224,6 +315,13 @@ class UfldLaneDetector(private val context: Context) {
         emaState.clear()
         emaFrame.clear()
         frameCounter = 0L
+        egoGeometry.reset()
+        offsetHistory.clear()
+        lastShiftLeft = 0f
+        lastShiftRight = 0f
+        leftSupport = 1f
+        rightSupport = 1f
+        currentOffset = 0f
     }
 
     private fun obtainInput(): ByteBuffer {
@@ -256,55 +354,37 @@ class UfldLaneDetector(private val context: Context) {
         val itp = interpreter ?: return UfldResult(null, null, 0f, false)
         frameCounter++
         return try {
-            val lanes = runInference(itp, bitmap)
-            val pair = chooseEgoPair(lanes, bitmap.width)
-            // Per-frame diagnostics: which path the device actually takes.
-            // Logged every 10th frame (plus every miss) so VM logcat shows
-            // hit rate without spamming. Sizes are per-lane point counts.
+            val frame = runInference(itp, bitmap)
+            // One marking mask per frame, reused by both sides.
+            markingMeasurer.buildMarkingMask(frame.pixels, INPUT_W, INPUT_H)
+            val lanes = frame.lanes
+            val candidates = lanes.filterNotNull()
+                .map { EgoLaneGeometry.Lane(it.index, it.xBottom, it.size) }
+            // Learn the ego width BEFORE pairing: this frame supplies both.
+            egoGeometry.observeWidth(candidates, bitmap.width)
+            val pair = egoGeometry.choosePair(candidates, bitmap.width)
             val sizes = lanes.map { it?.size ?: 0 }
             if (pair == null) {
-                // Single-lane fallback before decaying: if exactly one side
-                // has candidates, mirror it to the missing side at the
-                // expected ego width. Confidence is capped — the mirrored
-                // side is a guess, but a one-sided overlay beats "no lanes".
-                val single = singleSideLane(lanes, bitmap.width)
-                if (frameCounter % 10 == 0L || single == null) {
-                    android.util.Log.d(
-                        "UfldLaneDetector",
-                        "frame=$frameCounter backend=$activeBackend " +
-                            "sizes=${sizes} pair=none " +
-                            "single=${single ?: "none"} " +
-                            "img=${bitmap.width}x${bitmap.height}"
-                    )
-                }
-                if (single != null) {
-                    val (side, pts) = single
-                    val mirrored = if (side == "L") {
-                        Pair(smooth("L", pts), smooth("R", mirrorLane(pts, bitmap.width, toRight = true)!!))
-                    } else {
-                        Pair(smooth("L", mirrorLane(pts, bitmap.width, toRight = false)!!), smooth("R", pts))
-                    }
-                    val nPts = pts.size / NUM_ROWS.toFloat()
-                    val conf = (0.35f + minOf(1f, nPts * 1.5f) * 0.3f).coerceIn(0f, 0.65f)
-                    UfldResult(mirrored.first, mirrored.second, conf, true, mirrored = true)
-                } else {
-                    holdLast()
-                }
+                singleSide(lanes, bitmap, frame, sizes)
             } else {
                 val (li, ri) = pair
+                val left = reAnchor(lanes[li]!!, frame, bitmap)
+                val right = reAnchor(lanes[ri]!!, frame, bitmap)
+                val leftSm = smooth("L", left)
+                val rightSm = smooth("R", right)
+                val (rawOffset, conf) = evaluate(leftSm, rightSm, bitmap.width, bitmap.height, mirrored = false)
+                currentOffset = rawOffset
                 if (frameCounter % 10 == 0L) {
                     android.util.Log.d(
                         "UfldLaneDetector",
-                        "frame=$frameCounter backend=$activeBackend " +
-                            "sizes=${sizes} pair=$pair " +
-                            "img=${bitmap.width}x${bitmap.height}"
+                        "frame=$frameCounter backend=$activeBackend sizes=$sizes pair=$pair " +
+                            "img=${bitmap.width}x${bitmap.height} " +
+                            "shift=${"%.1f".format(lastShiftLeft)}/${"%.1f".format(lastShiftRight)} " +
+                            "sup=${"%.2f".format(leftSupport)}/${"%.2f".format(rightSupport)} " +
+                            "off=${"%.1f".format(rawOffset)} conf=${"%.2f".format(conf)}"
                     )
                 }
-                val left = smooth("L", lanes[li]!!)
-                val right = smooth("R", lanes[ri]!!)
-                val nPts = (lanes[li]!!.size + lanes[ri]!!.size) / (2f * NUM_ROWS)
-                val conf = (0.4f + minOf(1f, nPts * 1.5f) * 0.55f).coerceIn(0f, 1f)
-                UfldResult(left, right, conf, true)
+                UfldResult(leftSm, rightSm, conf, true, offsetPx = rawOffset)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -313,45 +393,157 @@ class UfldLaneDetector(private val context: Context) {
     }
 
     /**
-     * Strongest single-side lane when no left+right pair exists. Returns
-     * ("L"|"R", points) or null when neither side has a usable candidate.
-     * A side is usable when it holds the most-points lane on that side of
-     * the image center.
+     * No ego pair: continue with a single visible boundary. The missing side is
+     * mirrored by the MEASURED half width, and the whole sample is capped below
+     * the alert floor so it can be drawn but never warned about.
      */
-    internal fun singleSideLane(lanes: Array<LanePoints?>, imgW: Int): Pair<String, LanePoints>? {
-        val mid = imgW / 2f
-        var bestL: LanePoints? = null
-        var bestR: LanePoints? = null
-        for (l in lanes) {
-            if (l == null || l.size < MIN_POINTS) continue
-            var maxY = Float.NEGATIVE_INFINITY
-            var xAtMaxY = 0f
-            for (j in 0 until l.size) {
-                if (l.y[j] > maxY) {
-                    maxY = l.y[j]
-                    xAtMaxY = l.x[j]
-                }
-            }
-            if (xAtMaxY < mid) {
-                if (bestL == null || l.size > bestL.size) bestL = l
-            } else {
-                if (bestR == null || l.size > bestR.size) bestR = l
-            }
+    private fun singleSide(
+        lanes: Array<LanePoints?>,
+        bitmap: Bitmap,
+        frame: Frame,
+        sizes: List<Int>
+    ): UfldResult {
+        val single = singleSideLane(lanes, bitmap.width)
+        if (single == null) {
+            android.util.Log.d(
+                "UfldLaneDetector",
+                "frame=$frameCounter backend=$activeBackend sizes=$sizes pair=none single=none"
+            )
+            return holdLast()
         }
-        return when {
-            bestL != null && bestR != null -> null // both sides -> pair path owns this
-            bestL != null -> Pair("L", bestL)
-            bestR != null -> Pair("R", bestR)
-            else -> null
+        val (side, rawPts) = single
+        val pts = reAnchor(rawPts, frame, bitmap)
+        val half = egoGeometry.halfWidth(bitmap.width)
+        val shiftedX = FloatArray(pts.size) { i ->
+            (pts.x[i] + if (side == "L") half else -half).coerceIn(0f, bitmap.width.toFloat())
         }
+        val other = LanePoints(shiftedX, pts.y.copyOf())
+        val left = if (side == "L") pts else other
+        val right = if (side == "L") other else pts
+        val leftSm = smooth("L", left)
+        val rightSm = smooth("R", right)
+        val (rawOffset, conf) = evaluate(leftSm, rightSm, bitmap.width, bitmap.height, mirrored = true)
+        currentOffset = rawOffset
+        if (frameCounter % 10 == 0L) {
+            android.util.Log.d(
+                "UfldLaneDetector",
+                "frame=$frameCounter backend=$activeBackend sizes=$sizes pair=none " +
+                    "single=$side half=${"%.0f".format(half)} conf=${"%.2f".format(conf)} " +
+                    "img=${bitmap.width}x${bitmap.height}"
+            )
+        }
+        return UfldResult(leftSm, rightSm, conf, true, mirrored = true, offsetPx = rawOffset)
     }
+
+    /**
+     * Re-anchor a decoded curve to the actual paint and record its support.
+     *
+     * UFLD carries a small, stable lateral bias (measured ~10 px at 1280 px
+     * width, present on every frame of a clip). The correction is applied only
+     * when it improves how well the curve sits on paint, so a frame without
+     * visible markings keeps the model's own output.
+     */
+    private fun reAnchor(pts: LanePoints, frame: Frame, bitmap: Bitmap): LanePoints {
+        val isLeftSide = pts.xBottom < bitmap.width / 2f
+        val scaleX = bitmap.width.toFloat() / INPUT_W
+        val scaleY = bitmap.height.toFloat() / INPUT_H
+        // Measure in IMAGE pixels; the renderer maps them onto the model-grid
+        // mask itself, so the mask is baked once per frame and never per sample.
+        val (deviation, supportBefore) = markingMeasurer.measure(pts.x, pts.y, bitmap.width, bitmap.height)
+        val maxCorrection = LaneOverlayRenderer.SEARCH_FRAC * bitmap.width
+        var corrected = pts
+        var supportAfter = supportBefore
+        if (abs(deviation) > 0.5f && abs(deviation) <= maxCorrection) {
+            val nx = FloatArray(pts.size) { i -> (pts.x[i] - deviation).coerceIn(0f, bitmap.width.toFloat()) }
+            val (_, s) = markingMeasurer.measure(nx, pts.y, bitmap.width, bitmap.height)
+            if (s >= supportBefore) {
+                corrected = LanePoints(nx, pts.y)
+                supportAfter = s
+            }
+        }
+        if (isLeftSide) {
+            leftSupport = supportAfter
+            lastShiftLeft = if (corrected === pts) 0f else deviation
+        } else {
+            rightSupport = supportAfter
+            lastShiftRight = if (corrected === pts) 0f else deviation
+        }
+        return corrected
+    }
+
+    /**
+     * Offset + evidence-based confidence for one sample.
+     *
+     * Both boundaries are evaluated at ONE row — as low as the data supports —
+     * so a curved boundary can no longer fake a lateral offset against a
+     * straight one.
+     */
+    private fun evaluate(
+        left: LanePoints?,
+        right: LanePoints?,
+        frameWidth: Int,
+        frameHeight: Int,
+        mirrored: Boolean
+    ): Pair<Float, Float> {
+        val leftOk = LaneGeometry.passesSpanGate(left, frameHeight)
+        val rightOk = LaneGeometry.passesSpanGate(right, frameHeight)
+        val evalRow = LaneGeometry.evalRow(
+            if (leftOk) left!!.yBottom else frameHeight.toFloat(),
+            if (rightOk) right!!.yBottom else frameHeight.toFloat(),
+            frameHeight
+        )
+        val covL = if (leftOk) LaneGeometry.coverage(left, evalRow, frameHeight, leftSupport) else 0f
+        val covR = if (rightOk) LaneGeometry.coverage(right, evalRow, frameHeight, rightSupport) else 0f
+
+        val offset: Float
+        var conf: Float
+        if (leftOk && rightOk) {
+            val xl = LaneGeometry.fitQuadratic(left!!.x, left.y)?.x(evalRow) ?: left.xBottom
+            val xr = LaneGeometry.fitQuadratic(right!!.x, right.y)?.x(evalRow) ?: right.xBottom
+            offset = egoGeometry.centerOffset(xl, xr, frameWidth)
+            val gap = xr - xl
+            val prior = egoGeometry.widthOr(frameWidth)
+            val plausibility = (1f - abs(gap - prior) / (0.8f * prior)).coerceIn(0.4f, 1f)
+            conf = 0.45f + 0.5f * ((covL + covR) / 2f) * plausibility
+            if (mirrored) conf = min(conf, MIRROR_CONFIDENCE_CAP)
+        } else {
+            val single = if (leftOk) left!! else right!!
+            val x = LaneGeometry.fitQuadratic(single.x, single.y)?.x(evalRow) ?: single.xBottom
+            offset = egoGeometry.singleSideOffset(x, leftOk, frameWidth)
+            conf = min(0.30f + 0.35f * max(covL, covR), MIRROR_CONFIDENCE_CAP)
+        }
+        return Pair(offset, conf.coerceIn(0f, 0.98f))
+    }
+
+    /**
+     * Temporal median of the ego offset — the value the drift gate sees.
+     * The raw per-frame offset jitters by several pixels even on a straight
+     * road, and a threshold sitting exactly at that noise level produced
+     * departure warnings while driving straight.
+     */
+    @Synchronized
+    fun smoothedOffset(rawOffset: Float): Float {
+        offsetHistory.addLast(rawOffset)
+        while (offsetHistory.size > OFFSET_MEDIAN_N) offsetHistory.removeFirst()
+        val sorted = offsetHistory.sorted()
+        return sorted[sorted.size / 2]
+    }
+
+    /** True once enough samples exist for the median to mean anything. */
+    fun hasOffsetHistory(): Boolean = offsetHistory.size >= OFFSET_MEDIAN_MIN
+
+    /** Number of offset samples collected (for the drift gate's history floor). */
+    fun offsetHistorySize(): Int = offsetHistory.size
+
+    /** Measured ego lane width in image px, or 0 while nothing was measured. */
+    fun measuredLaneWidthPx(): Float = egoGeometry.measuredWidth
 
     private fun holdLast(): UfldResult {
         // Dashed lines / shadows: keep last lanes briefly, then decay.
         val l = emaState["L"]?.takeIf { frameCounter - (emaFrame["L"] ?: -99L) <= HOLD_FRAMES }
         val r = emaState["R"]?.takeIf { frameCounter - (emaFrame["R"] ?: -99L) <= HOLD_FRAMES }
         return if (l != null || r != null) {
-            UfldResult(l, r, 0.35f, l != null && r != null)
+            UfldResult(l, r, HOLD_CONFIDENCE, l != null && r != null, offsetPx = currentOffset)
         } else {
             UfldResult(null, null, 0.1f, false)
         }
@@ -371,7 +563,10 @@ class UfldLaneDetector(private val context: Context) {
         return out
     }
 
-    private fun runInference(itp: Interpreter, bitmap: Bitmap): Array<LanePoints?> {
+    /** Inference result: decoded lanes in IMAGE pixels plus the model-grid pixels. */
+    private data class Frame(val lanes: Array<LanePoints?>, val pixels: IntArray)
+
+    private fun runInference(itp: Interpreter, bitmap: Bitmap): Frame {
         val input = obtainInput()
         val pixels = IntArray(INPUT_W * INPUT_H)
         val scaled = if (bitmap.width == INPUT_W && bitmap.height == INPUT_H) {
@@ -443,82 +638,42 @@ class UfldLaneDetector(private val context: Context) {
                 }
                 // Reference formula in 1280x720 cfg space, then scale to image.
                 // Row-axis pairing: base=(NUM_ROWS-1-row) reads bottom-up, so the
-                // anchor must use the same axis (NUM_ROWS-1-row). ROW_ANCHORS[row]
-                // pairs the bottom row's logits with the top anchor (y inverted),
-                // which shrinks the ego gap and fails the pair gate on straight
-                // roads (validated frame-by-frame vs reference decode on-device).
+                // anchor must use the same axis (NUM_ROWS-1-row).
                 val pxCfg = loc * (800f / GRIDING_NUM) * (CFG_W / 800f) - 1f
                 val pyCfg = CFG_H * (ROW_ANCHORS[NUM_ROWS - 1 - row] / 288f) - 1f
                 xs.add(pxCfg * imgW / CFG_W)
                 ys.add(pyCfg * imgH / CFG_H)
             }
             if (xs.size >= MIN_POINTS) {
-                lanes[lane] = LanePoints(xs.toFloatArray(), ys.toFloatArray())
+                lanes[lane] = LanePoints(xs.toFloatArray(), ys.toFloatArray(), lane)
             }
         }
-        return lanes
+        return Frame(lanes, pixels)
     }
 
     /**
-     * Ego pair: one lane left of center, one right of center, plausible gap.
-     * Prefers TuSimple-semantic indices (1,2) on ties; accepts (0,2)/(1,3)/
-     * (0,3) when the model merged or split lanes. Bottom-row x decides.
-     *
-     * SINGLE-LANE FALLBACK: when only one side has candidates (the other side
-     * occluded by traffic, faded paint, glare), the missing side is mirrored
-     * from the visible lane using the expected ego width (~45% of frame).
-     * The mirrored side is flagged via UfldResult.mirrored so callers can
-     * lower confidence. Without this, single-side frames (common on real
-     * roads: trailer ahead, dashed lines, intersections) reported nothing
-     * even though the model saw one boundary clearly.
+     * Single-side fallback: the lane with the most points on the one visible
+     * side of the image centre. Returns ("L"|"R", points) or null when both
+     * sides have candidates (the pair path owns that case).
      */
-    internal fun chooseEgoPair(lanes: Array<LanePoints?>, imgW: Int): Pair<Int, Int>? {
+    internal fun singleSideLane(lanes: Array<LanePoints?>, imgW: Int): Pair<String, LanePoints>? {
         val mid = imgW / 2f
-        data class Cand(val idx: Int, val xBot: Float)
-        val left = ArrayList<Cand>()
-        val right = ArrayList<Cand>()
-        for (i in lanes.indices) {
-            val l = lanes[i] ?: continue
-            if (l.size < MIN_POINTS) continue
-            var maxY = Float.NEGATIVE_INFINITY
-            var xAtMaxY = 0f
-            for (j in 0 until l.size) {
-                if (l.y[j] > maxY) {
-                    maxY = l.y[j]
-                    xAtMaxY = l.x[j]
-                }
-            }
-            if (xAtMaxY < mid) left.add(Cand(i, xAtMaxY)) else right.add(Cand(i, xAtMaxY))
-        }
-        var best: Pair<Int, Int>? = null
-        var bestScore = Float.NEGATIVE_INFINITY
-        for (l in left) {
-            for (r in right) {
-                val gap = (r.xBot - l.xBot) / imgW
-                if (gap < MIN_GAP_FRac || gap > MAX_GAP_FRac) continue
-                var score = -abs(gap - 0.45f)
-                score -= (abs(l.idx - 1) + abs(r.idx - 2)) * 0.01f
-                if (score > bestScore) {
-                    bestScore = score
-                    best = Pair(l.idx, r.idx)
-                }
+        var bestL: LanePoints? = null
+        var bestR: LanePoints? = null
+        for (l in lanes) {
+            if (l == null || l.size < MIN_POINTS) continue
+            if (l.xBottom < mid) {
+                if (bestL == null || l.size > bestL.size) bestL = l
+            } else {
+                if (bestR == null || l.size > bestR.size) bestR = l
             }
         }
-        return best
-    }
-
-    /**
-     * Mirror a single visible lane to the missing side using the expected ego
-     * width. Returns the mirrored points in the same image-pixel space, or
-     * null when the visible lane itself is unusable. Y-coordinates are kept;
-     * only X is shifted by halfWidthPx (caller passes imgW*0.45-ish).
-     */
-    internal fun mirrorLane(pts: LanePoints?, imgW: Int, toRight: Boolean): LanePoints? {
-        if (pts == null || pts.size < MIN_POINTS) return null
-        val halfWidth = imgW * 0.45f / 2f
-        val shift = if (toRight) halfWidth else -halfWidth
-        val nx = FloatArray(pts.size) { i -> (pts.x[i] + shift).coerceIn(0f, imgW.toFloat()) }
-        return LanePoints(nx, pts.y.copyOf())
+        return when {
+            bestL != null && bestR != null -> null // both sides -> pair path owns this
+            bestL != null -> Pair("L", bestL)
+            bestR != null -> Pair("R", bestR)
+            else -> null
+        }
     }
 
     data class UfldResult(
@@ -527,6 +682,8 @@ class UfldLaneDetector(private val context: Context) {
         val confidence: Float,
         val bothValid: Boolean,
         /** True when one side was mirrored from the other (single-lane fallback). */
-        val mirrored: Boolean = false
+        val mirrored: Boolean = false,
+        /** Vehicle-centre offset in image pixels, evaluated at one common row. */
+        val offsetPx: Float = 0f
     )
 }

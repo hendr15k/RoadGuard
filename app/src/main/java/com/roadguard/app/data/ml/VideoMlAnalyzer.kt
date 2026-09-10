@@ -168,7 +168,8 @@ class VideoMlAnalyzer(
                     ufldResult = null
                 }
             }
-            val ufldOk = ufldResult != null && (ufldResult.left != null || ufldResult.right != null)
+            val ufldOk = ufld != null && ufldResult != null &&
+                (ufldResult.left != null || ufldResult.right != null)
 
             // Lazy classic-CV fallback: only computed when UFLD has no ego
             // pair. Held nullable so the log line and the fallback branch can
@@ -224,7 +225,9 @@ class VideoMlAnalyzer(
                         )
                     } ?: com.roadguard.app.domain.model.LaneCurve()
                 } else {
-                    val ufldOff = ufldCenterOffset(ufldResult, bitmap.width)
+                    val ufldOff = ufld!!.smoothedOffset(ufldResult.offsetPx)
+                    val historyLen = ufld.offsetHistorySize()
+                    val laneWidthPx = ufld.measuredLaneWidthPx()
                     // Same gate as the camera path ([MlDetectionAnalyzer]): a
                     // stub side that the span gate rejected must not feed the
                     // offset helper and trigger a warning for a lane the
@@ -235,7 +238,9 @@ class VideoMlAnalyzer(
                         sensitivity = laneSensitivity,
                         confidence = ufldResult.confidence,
                         leftCurveValid = leftOk,
-                        rightCurveValid = rightOk
+                        rightCurveValid = rightOk,
+                        historySize = historyLen,
+                        laneWidth = laneWidthPx
                     )
                     finalIsDriftingRight = LaneDriftGate.isDriftingRight(
                         centerOffset = ufldOff,
@@ -243,11 +248,13 @@ class VideoMlAnalyzer(
                         sensitivity = laneSensitivity,
                         confidence = ufldResult.confidence,
                         leftCurveValid = leftOk,
-                        rightCurveValid = rightOk
+                        rightCurveValid = rightOk,
+                        historySize = historyLen,
+                        laneWidth = laneWidthPx
                     )
                     finalConfidence = ufldResult.confidence
                     finalCenterOffset = ufldOff
-                    finalLaneWidth = ufldLaneWidth(ufldResult)
+                    finalLaneWidth = laneWidthPx.takeIf { it > 1f } ?: ufldLaneWidth(ufldResult)
                     leftMark = if (ufldResult.left != null && leftOk) "L" else "-"
                     rightMark = if (ufldResult.right != null && rightOk) "R" else "-"
                     leftCurve = curves.first
@@ -533,18 +540,6 @@ class VideoMlAnalyzer(
             }
         }
         return xAtMaxY
-    }
-
-    private fun ufldCenterOffset(res: UfldLaneDetector.UfldResult, imgW: Int): Float {
-        val lx = ufldLaneCenterX(res.left)
-        val rx = ufldLaneCenterX(res.right)
-        val vehicleCenter = imgW * 0.5f
-        return when {
-            lx != null && rx != null -> vehicleCenter - (lx + rx) / 2f
-            lx != null -> vehicleCenter - lx - 150f
-            rx != null -> vehicleCenter - rx + 150f
-            else -> 0f
-        }
     }
 
     private fun ufldLaneWidth(res: UfldLaneDetector.UfldResult): Float {
