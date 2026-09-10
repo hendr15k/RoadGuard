@@ -29,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -41,6 +42,7 @@ import com.google.accompanist.permissions.rememberPermissionState
 import com.roadguard.app.data.ml.MlDetectionAnalyzer
 import com.roadguard.app.data.ml.VideoMlAnalyzer
 import com.roadguard.app.domain.model.AlertPhase
+import com.roadguard.app.domain.model.AlertPolicy
 import com.roadguard.app.domain.model.AlertSignal
 import com.roadguard.app.domain.model.AlertState
 import com.roadguard.app.domain.model.WarningType
@@ -52,6 +54,10 @@ import com.roadguard.app.ui.theme.DangerRed
 import com.roadguard.app.ui.theme.SafeGreen
 import com.roadguard.app.ui.theme.WarningYellow
 import com.roadguard.app.ui.theme.DarkBackground
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -67,21 +73,32 @@ fun MainScreen(
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPicker by remember { mutableStateOf(false) }
     val appContext = context.applicationContext
+    // A key that changes with the configuration: `remember(videoUri)` alone
+    // survived a rotation, so the analyzer (and its tensor sessions) was
+    // re-created by the new composition while the old one stayed alive
+    // forever — the DisposableEffect never disposed it.
+    val uiMode = LocalConfiguration.current.uiMode
     // VideoMlAnalyzer wird nur erzeugt wenn der User tatsächlich ein Video
     // auswählt. Frühere Implementierung erzeugte ihn immer (und damit
     // ObjectDetector + TFLite Interpreter + Speicher), auch im Live-Modus.
-    val videoAnalyzer = remember(videoUri) {
+    val videoAnalyzer = remember(videoUri, uiMode) {
         if (videoUri != null) VideoMlAnalyzer(appContext = appContext) else null
     }
+    // Own scope so the async close() can be cancelled again: a fire-and-forget
+    // CoroutineScope leaked for the lifetime of the process on every rotation.
+    val analyzerScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
     DisposableEffect(videoAnalyzer) {
         onDispose {
             val analyzer = videoAnalyzer ?: return@onDispose
             // Closing can block behind an in-flight frame; keep it off the main
             // thread. The analyzer serializes close() with its detector.
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+            analyzerScope.launch {
                 analyzer.close()
             }
         }
+    }
+    DisposableEffect(analyzerScope) {
+        onDispose { analyzerScope.cancel() }
     }
 
     val laneInfo by viewModel.laneInfo.collectAsState()
@@ -499,7 +516,9 @@ fun StatusBar(
             }
             val laneColor = when (activeType) {
                 is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight -> WarningYellow
-                else -> if (laneInfo == null) Color.Gray else SafeGreen
+                else -> if (laneInfo == null) Color.Gray
+                    else if (laneInfo.confidence < AlertPolicy.MIN_LANE_CONFIDENCE) WarningYellow
+                    else SafeGreen
             }
             Text(
                 laneText,

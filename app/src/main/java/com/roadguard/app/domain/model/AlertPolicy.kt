@@ -43,6 +43,16 @@ class AlertPolicy {
         /** Collision re-alarm cadence, independent of the (lane-oriented) user setting. */
         const val MIN_REPEAT_INTERVAL_MS = 1_000L
 
+        /**
+         * A TTC-derived collision risk only counts as a collision inside this
+         * range. [VehicleDistance.isTooClose] is also true for a merely
+         * fast-closing vehicle (ttc < 2.5 s), and a car 60 m ahead closing at
+         * 25 m/s keeps that flag set for minutes: it outranked a simultaneous
+         * lane departure and escalated to the urgent collision pattern without
+         * ever being near.
+         */
+        const val COLLISION_TTC_RANGE_M = 30f
+
         /** After this many repeats a sustained collision escalates to urgent. */
         const val ESCALATION_REPEATS = 3
 
@@ -146,6 +156,9 @@ class AlertPolicy {
         // (e.g. paused video, stalled pipeline). Fresh samples carry the frame's
         // capture timestamp; a sample that never updates is treated as stale.
         if (nowMs - distance.timestamp > STALE_MS) return null
+        // isTooClose also covers a merely fast-closing vehicle (ttc < 2.5 s)
+        // that is still far away; only a genuinely close one is a collision.
+        if (distance.distanceMeters > COLLISION_TTC_RANGE_M) return null
         return WarningType.ForwardCollision
     }
 

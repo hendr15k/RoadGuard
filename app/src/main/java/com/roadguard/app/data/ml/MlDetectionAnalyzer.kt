@@ -71,6 +71,9 @@ class MlDetectionAnalyzer(
     private var prevTime: Long = 0
     @Volatile
     private var trackedBox: Rect? = null
+    // Only ever touched from the single analyzer thread (analyze() is called
+    // serially for one ImageAnalysis use case), unlike the @Volatile fields
+    // above which are also read from ML Kit's callback thread.
     private val distanceHistory = ArrayDeque<Float>(5)
 
     // Camera parameters (approximate for typical smartphone)
@@ -83,6 +86,16 @@ class MlDetectionAnalyzer(
     /** Guards the ML Kit detector so close() cannot dispose it mid-frame. */
     private val detectorLock = Any()
     private var ufldRetryAtMs = 0L
+
+    /**
+     * One lane sample per frame max — the gate's confirmation window assumes
+     * the ~5 Hz detection rate, and (worse) every repetition used to be a
+     * "current frame" for the freshness check, so one detection held the
+     * hazard open forever. The sample therefore carries the frame's capture
+     * time and is only published when it changed.
+     */
+    @Volatile
+    private var lastLaneStampMs = 0L
     private companion object {
         /** Minimum gap between UFLD (re-)load attempts. */
         private const val UFLD_RETRY_COOLDOWN_MS = 30_000L
@@ -127,6 +140,8 @@ class MlDetectionAnalyzer(
             imageProxy.close()
             return
         }
+        // Captured before the throttle: the lane sample below is stamped with
+        // it further down, where `currentTime` is no longer in scope.
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastProcessTime < processInterval) {
             imageProxy.close()
@@ -272,7 +287,7 @@ class MlDetectionAnalyzer(
                 rightCurve = toDomainCurve(swResult.rightLane)
             }
 
-            _laneInfo.value = LaneInfo(
+            val laneSample = LaneInfo(
                 isDriftingLeft = finalIsDriftingLeft,
                 isDriftingRight = finalIsDriftingRight,
                 confidence = finalConfidence,
@@ -285,8 +300,16 @@ class MlDetectionAnalyzer(
                 leftCurve = leftCurve,
                 rightCurve = rightCurve,
                 imageWidth = swResult.imageWidth,
-                imageHeight = swResult.imageHeight
+                imageHeight = swResult.imageHeight,
+                timestamp = currentTime
             )
+            // At most one sample per processed frame: repeated identical
+            // emissions would re-stamp the gate with "now" and hold a hazard
+            // open forever.
+            if (currentTime != lastLaneStampMs) {
+                lastLaneStampMs = currentTime
+                _laneInfo.value = laneSample
+            }
 
             // Close must be serialized with a frame still in process: closing
             // the detector mid-frame crashes ("Cannot use closed Detector").
