@@ -350,6 +350,27 @@ class AlertPolicyTest {
         assertEquals(WarningType.ForwardCollision, evaluation.signal?.type)
     }
 
+    @Test
+    fun theUsersOwnFollowingDistanceRaisesTheCollisionRange() {
+        // The 30 m floor must not silently override a user who configured a 50 m
+        // following distance: a fast-closer at 45 m still alarms for them.
+        val settings = AppSettings(minFollowingDistanceMeters = 50f)
+        val farButClosing = VehicleDistance(distanceMeters = 45f, isTooClose = true, timeToCollision = 2.0f)
+
+        assertEquals(50f, AlertPolicy.collisionRangeFor(settings), 0.001f)
+        assertEquals(30f, AlertPolicy.collisionRangeFor(AppSettings()), 0.001f)
+
+        feed(nowMs = 1_000, distance = farButClosing, settings = settings)
+        val evaluation = feed(
+            nowMs = 1_000 + AlertPolicy.COLLISION_CONFIRM_MS,
+            distance = farButClosing,
+            settings = settings
+        )
+
+        assertEquals(WarningType.ForwardCollision, evaluation.state.typeOrNull())
+        assertEquals(WarningType.ForwardCollision, evaluation.signal?.type)
+    }
+
     // --- independent pipelines ------------------------------------------------
 
     @Test

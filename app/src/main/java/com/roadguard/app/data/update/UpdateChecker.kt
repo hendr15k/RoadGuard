@@ -140,12 +140,8 @@ class UpdateChecker @Inject constructor(
     }
 
     private fun compareSemanticVersions(version1: String, version2: String): Int {
-        // Trailing zeros are not significant: "1.0.0" and "1.0" describe the
-        // same version. Without stripping them compareSemanticVersions()
-        // reported a tag with a longer zero tail as newer, so the banner kept
-        // offering an update the user had already installed.
-        val v1Numbers = extractVersionNumbers(version1).dropLastWhile { it == 0 }
-        val v2Numbers = extractVersionNumbers(version2).dropLastWhile { it == 0 }
+        val v1Numbers = extractVersionNumbers(version1)
+        val v2Numbers = extractVersionNumbers(version2)
 
         for (i in 0 until maxOf(v1Numbers.size, v2Numbers.size)) {
             val v1Part = v1Numbers.getOrElse(i) { 0 }
