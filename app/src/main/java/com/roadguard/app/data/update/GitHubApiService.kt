@@ -23,6 +23,9 @@ class GitHubApiService @Inject constructor(
         // latest-Endpoint filtert diese serverseitig heraus. Liefert ein
         // Objekt statt eines Arrays — Parsing unten folgt dem.
         private const val RELEASES_URL = "https://api.github.com/repos/hendr15k/RoadGuard/releases/latest"
+
+        /** Backoff when the 403 carries neither Retry-After nor a reset stamp. */
+        private const val DEFAULT_BACKOFF_MS = 300_000L
     }
 
     private val gson = Gson()
@@ -63,10 +66,22 @@ class GitHubApiService @Inject constructor(
 
             val responseCode = connection.responseCode
             if (responseCode == 403) {
-                val retryAfter = connection.getHeaderField("Retry-After")?.toLongOrNull() ?: 60L
-                rateLimitUntilMs = System.currentTimeMillis() + retryAfter * 1000L
-                Log.w(TAG, "Rate limited. Retry after: $retryAfter seconds (backoff until ${rateLimitUntilMs})")
-                return@withContext Result.failure(Exception("Rate limited. Try again in $retryAfter seconds."))
+                // GitHub answers a *primary* rate limit with 403 +
+                // X-RateLimit-Reset and no Retry-After at all; only secondary
+                // limits carry Retry-After. See [rateLimitBackoffMs].
+                val nowMs = System.currentTimeMillis()
+                val waitMs = rateLimitBackoffMs(
+                    retryAfterSeconds = connection.getHeaderField("Retry-After")?.toLongOrNull(),
+                    resetEpochSeconds = connection.getHeaderField("X-RateLimit-Reset")?.toLongOrNull(),
+                    nowMs = nowMs,
+                    defaultMs = DEFAULT_BACKOFF_MS
+                )
+                rateLimitUntilMs = nowMs + waitMs
+                val waitSec = waitMs / 1000
+                Log.w(TAG, "Rate limited. Backing off for $waitSec s (until $rateLimitUntilMs)")
+                return@withContext Result.failure(
+                    Exception("Rate limited. Try again in $waitSec seconds.")
+                )
             }
 
             if (responseCode == HttpURLConnection.HTTP_OK) {

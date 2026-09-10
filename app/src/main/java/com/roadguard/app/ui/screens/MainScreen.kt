@@ -45,6 +45,7 @@ import com.roadguard.app.domain.model.AlertPolicy
 import com.roadguard.app.domain.model.AlertSignal
 import com.roadguard.app.domain.model.AlertState
 import com.roadguard.app.domain.model.WarningType
+import com.roadguard.app.domain.model.isFresh
 import com.roadguard.app.ui.components.LaneOverlay
 import com.roadguard.app.ui.components.SettingsBottomSheet
 import com.roadguard.app.ui.components.UpdateBanner
@@ -57,7 +58,37 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+/**
+ * Closes disposed analyzers off the main thread. Process-lifetime on purpose —
+ * see the comment at its use site: a scope belonging to the composition can be
+ * cancelled before the close it was handed actually runs.
+ */
+private val closeExecutor = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, "roadguard-analyzer-close").apply { isDaemon = true }
+}
+
+/**
+ * A ticking clock for HUD freshness.
+ *
+ * `remember(key) { System.currentTimeMillis() }` is not enough to clear a stalled
+ * HUD: when the pipeline stops publishing there is no further recomposition, so
+ * the remembered value is never re-read and the stale reading stays on screen —
+ * precisely the case the staleness check exists for. This state re-emits on its
+ * own, so the display goes blank a tick after the samples stop.
+ */
+@Composable
+private fun rememberFreshnessTick(periodMs: Long = 500L): Long {
+    val now by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) {
+            value = System.currentTimeMillis()
+            delay(periodMs)
+        }
+    }
+    return now
+}
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
@@ -84,23 +115,24 @@ fun MainScreen(
     val videoAnalyzer = remember(videoUri) {
         if (videoUri != null) VideoMlAnalyzer(appContext = appContext) else null
     }
-    // One long-lived scope for the async close(). The previous version created a
-    // fresh CoroutineScope per disposal (one leaked scope per video switch).
-    // NOTE: this effect must stay declared BEFORE the analyzer effect below:
-    // Compose disposes remember-observers in reverse declaration order, so the
-    // scope has to be cancelled last — otherwise the close() launched in the
-    // analyzer effect's onDispose would be dropped.
-    val analyzerScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
-    DisposableEffect(analyzerScope) {
-        onDispose { analyzerScope.cancel() }
-    }
+    // One process-lifetime close executor: a scope created inside this
+    // composition cannot be used to close the analyzer, because Compose
+    // disposes effects in reverse declaration order — the scope effect (declared
+    // above) is torn down and cancelled in the same pass, so a close() launched
+    // into it right before the cancel can be killed before it ever starts and
+    // the analyzer (TFLite interpreter, ML Kit detector, native buffers) is
+    // leaked. An executor outside the composition always runs the close.
     DisposableEffect(videoAnalyzer) {
         onDispose {
             val analyzer = videoAnalyzer ?: return@onDispose
             // Closing can block behind an in-flight frame; keep it off the main
             // thread. The analyzer serializes close() with its detector.
-            analyzerScope.launch {
-                analyzer.close()
+            closeExecutor.execute {
+                try {
+                    analyzer.close()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
     }
@@ -501,6 +533,15 @@ fun StatusBar(
     modifier: Modifier = Modifier,
     distanceThreshold: Float = 20f
 ) {
+    // A stale sample must disappear from the HUD, not just from the alarm: a
+    // paused video or a stalled pipeline left the last "DIST 12.4m / TTC 1.8s"
+    // on screen after the gate had already dropped the hazard. The tick is a
+    // self-updating clock (see rememberFreshnessTick) — keying a plain
+    // System.currentTimeMillis() on the samples would never re-run, because a
+    // stalled pipeline produces no recomposition at all.
+    val now = rememberFreshnessTick()
+    val freshLane = laneInfo?.takeIf { it.isFresh(now) }
+    val freshDistance = vehicleDistance?.takeIf { it.isFresh(now) }
     val activeType = (alertState as? AlertState.Warning)?.takeIf { it.phase == AlertPhase.ACTIVE }?.type
     Row(
         modifier = modifier
@@ -520,14 +561,14 @@ fun StatusBar(
                 // The gate drops a sample below MIN_LANE_CONFIDENCE without any
                 // warning, so reporting "OK" here claimed a healthy lane the
                 // safety system had actually decided to ignore.
-                laneInfo == null -> "--"
-                laneInfo.confidence < AlertPolicy.MIN_LANE_CONFIDENCE -> "??"
+                freshLane == null -> "--"
+                freshLane.confidence < AlertPolicy.MIN_LANE_CONFIDENCE -> "??"
                 else -> "OK"
             }
             val laneColor = when (activeType) {
                 is WarningType.LaneDepartureLeft, is WarningType.LaneDepartureRight -> WarningYellow
-                else -> if (laneInfo == null) Color.Gray
-                    else if (laneInfo.confidence < AlertPolicy.MIN_LANE_CONFIDENCE) WarningYellow
+                else -> if (freshLane == null) Color.Gray
+                    else if (freshLane.confidence < AlertPolicy.MIN_LANE_CONFIDENCE) WarningYellow
                     else SafeGreen
             }
             Text(
@@ -538,11 +579,11 @@ fun StatusBar(
         }
 
         // Lane visibility
-        if (laneInfo != null) {
+        if (freshLane != null) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("LANES", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Text(
-                    "${if (laneInfo.leftLaneVisible) "L" else "-"}${if (laneInfo.rightLaneVisible) "R" else "-"}",
+                    "${if (freshLane.leftLaneVisible) "L" else "-"}${if (freshLane.rightLaneVisible) "R" else "-"}",
                     color = Color.White,
                     style = MaterialTheme.typography.titleSmall
                 )
@@ -550,14 +591,14 @@ fun StatusBar(
         }
 
         // Center offset
-        if (laneInfo != null && kotlin.math.abs(laneInfo.centerOffset) > 5f) {
+        if (freshLane != null && kotlin.math.abs(freshLane.centerOffset) > 5f) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("OFFSET", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Text(
-                    String.format(java.util.Locale.US, "%.0fpx", laneInfo.centerOffset),
+                    String.format(java.util.Locale.US, "%.0fpx", freshLane.centerOffset),
                     color = when {
-                        kotlin.math.abs(laneInfo.centerOffset) > 50f -> DangerRed
-                        kotlin.math.abs(laneInfo.centerOffset) > 25f -> WarningYellow
+                        kotlin.math.abs(freshLane.centerOffset) > 50f -> DangerRed
+                        kotlin.math.abs(freshLane.centerOffset) > 25f -> WarningYellow
                         else -> SafeGreen
                     },
                     style = MaterialTheme.typography.titleSmall
@@ -570,12 +611,12 @@ fun StatusBar(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("DIST", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
             Text(
-                vehicleDistance?.distanceMeters?.let { String.format(java.util.Locale.US, "%.1fm", it) } ?: "--",
+                freshDistance?.distanceMeters?.let { String.format(java.util.Locale.US, "%.1fm", it) } ?: "--",
                 color = when {
                     activeType is WarningType.ForwardCollision -> DangerRed
-                    vehicleDistance == null -> Color.Gray
-                    vehicleDistance.distanceMeters < distanceThreshold * 0.75f -> DangerRed
-                    vehicleDistance.distanceMeters < distanceThreshold * 1.25f -> WarningYellow
+                    freshDistance == null -> Color.Gray
+                    freshDistance.distanceMeters < distanceThreshold * 0.75f -> DangerRed
+                    freshDistance.distanceMeters < distanceThreshold * 1.25f -> WarningYellow
                     else -> SafeGreen
                 },
                 style = MaterialTheme.typography.titleSmall
@@ -583,15 +624,15 @@ fun StatusBar(
         }
 
         // Time to collision
-        if (vehicleDistance != null && vehicleDistance.timeToCollision < 60f) {
+        if (freshDistance != null && freshDistance.timeToCollision < 60f) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("TTC", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Text(
-                    String.format(java.util.Locale.US, "%.1fs", vehicleDistance.timeToCollision),
+                    String.format(java.util.Locale.US, "%.1fs", freshDistance.timeToCollision),
                     color = when {
                         activeType is WarningType.ForwardCollision -> DangerRed
-                        vehicleDistance.timeToCollision < 2f -> DangerRed
-                        vehicleDistance.timeToCollision < 4f -> WarningYellow
+                        freshDistance.timeToCollision < 2f -> DangerRed
+                        freshDistance.timeToCollision < 4f -> WarningYellow
                         else -> SafeGreen
                     },
                     style = MaterialTheme.typography.titleSmall

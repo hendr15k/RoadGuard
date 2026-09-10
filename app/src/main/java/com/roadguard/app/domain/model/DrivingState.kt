@@ -27,6 +27,17 @@ data class LaneInfo(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+/**
+ * True while this sample is young enough to be shown. The HUD renders raw
+ * samples directly, so without this check a paused video kept the last
+ * distance/TTC/lane on screen indefinitely while [AlertPolicy] had already
+ * dropped the matching alarm — the display promised a hazard the safety logic
+ * had cleared. Shares [AlertPolicy.STALE_MS] so display and alarm cannot drift
+ * apart; the boundary is inclusive, matching the gate's `> STALE_MS` test.
+ */
+fun LaneInfo.isFresh(nowMs: Long = System.currentTimeMillis()): Boolean =
+    nowMs - timestamp <= AlertPolicy.STALE_MS
+
 data class VehicleDistance(
     val distanceMeters: Float,
     val isTooClose: Boolean,
@@ -34,6 +45,10 @@ data class VehicleDistance(
     val relativeSpeed: Float = 0f,
     val timestamp: Long = System.currentTimeMillis()
 )
+
+/** See [LaneInfo.isFresh] — same window, same boundary. */
+fun VehicleDistance.isFresh(nowMs: Long = System.currentTimeMillis()): Boolean =
+    nowMs - timestamp <= AlertPolicy.STALE_MS
 
 sealed class WarningType {
     data object LaneDepartureLeft : WarningType()

@@ -138,9 +138,8 @@ private fun startFrameProcessing(
     exoPlayer: ExoPlayer,
     videoAnalyzer: VideoMlAnalyzer
 ): Job {
-    // Eigener Scope mit SupervisorJob + Main-DispatchHandler, damit der Job
-    // beim Composable-Disposal sauber cancelled wird (via Dispatchers.Main
-    // immediate).
+    // Eigener Job + Main-Dispatcher-Handle: der Loop muss auf Cancellation
+    // reagieren und darf den ExoPlayer nach release() nicht mehr anfassen.
     val scope = CoroutineScope(Dispatchers.Default + Job())
     return scope.launch {
         val retriever = MediaMetadataRetriever()
@@ -149,17 +148,33 @@ private fun startFrameProcessing(
             val frameInterval = 300L
             var lastProcessedPosition = -1L
             var lastFrameTime = 0L
+            var consecutiveFailures = 0
 
             while (isActive) {
-                // EIN withContext-Block pro Iteration statt 3 — spart
-                // Context-Switches (vorher: 3 Switches pro Loop-Iteration).
-                val (currentPos, isPlayingNow, currentUri) = withContext(Dispatchers.Main) {
-                    Triple(
-                        exoPlayer.currentPosition,
-                        exoPlayer.isPlaying,
-                        exoPlayer.currentMediaItem?.localConfiguration?.uri
-                    )
+                // ExoPlayer::isPlaying goes through verifyApplicationThread() and
+                // throws (not "returns false") once the player has been released
+                // — every read below is therefore guarded. `Player.isCommandAvailable`
+                // is the supported way to detect a released instance: after
+                // release() only COMMAND_RELEASE stays available, so the loop
+                // leaves instead of running detached for the rest of the process,
+                // holding its MediaMetadataRetriever and hitting a dead player
+                // every 300 ms.
+                val snapshot = try {
+                    withContext(Dispatchers.Main) {
+                        if (!exoPlayer.isCommandAvailable(Player.COMMAND_RELEASE)) {
+                            return@withContext null
+                        }
+                        Triple(
+                            exoPlayer.currentPosition,
+                            runCatching { exoPlayer.isPlaying }.getOrDefault(false),
+                            exoPlayer.currentMediaItem?.localConfiguration?.uri
+                        )
+                    }
+                } catch (e: Exception) {
+                    null
                 }
+                if (snapshot == null) break
+                val (currentPos, isPlayingNow, currentUri) = snapshot
 
                 if (isPlayingNow) {
                     if (!retrieverInitialized) {
@@ -178,71 +193,30 @@ private fun startFrameProcessing(
                         lastProcessedPosition = currentPos
                         lastFrameTime = currentTime
 
-                        try {
-                            val bitmap = retriever.getFrameAtTime(
-                                currentPos * 1000,
-                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                            )
-                            if (bitmap != null) {
-                                // === Bitmap-Lifecycle fix ===
-                                // createScaledBitmap gibt das Original zurück
-                                // wenn die Maße passen — wir dürfen NICHT das
-                                // Original recyclen, weil ExoPlayer es noch
-                                // referenziert.
-                                //
-                                // ASPECT: Der Frame muss seitenrichtig auf
-                                // 640x360 gebracht werden — NICHT verzerrt.
-                                // Das alte createScaledBitmap(640,360) hat ein
-                                // 480x640-Portrait-Posterframe (oder jedes
-                                // andere Seitenverhältnis) auf Landscape
-                                // gequetscht: alle Kurven/Offsets danach waren
-                                // systematisch falsch (VM: Overlay im Himmel).
-                                // Wir croppen center auf 16:9 und skalieren
-                                // dann — gleiche Geometrie wie der Player.
-                                val srcW = bitmap.width
-                                val srcH = bitmap.height
-                                val targetW = 640
-                                val targetH = 360
-                                val targetAspect = targetW.toFloat() / targetH
-                                val srcAspect = srcW.toFloat() / srcH.coerceAtLeast(1)
-                                val cropped: android.graphics.Bitmap
-                                if (kotlin.math.abs(srcAspect - targetAspect) < 0.02f) {
-                                    cropped = bitmap
-                                } else if (srcAspect > targetAspect) {
-                                    // Zu breit: Seiten croppen.
-                                    val cropW = (srcH * targetAspect).toInt().coerceIn(1, srcW)
-                                    val x0 = ((srcW - cropW) / 2).coerceAtLeast(0)
-                                    cropped = android.graphics.Bitmap.createBitmap(bitmap, x0, 0, cropW, srcH)
-                                    if (cropped !== bitmap) bitmap.recycle()
-                                } else {
-                                    // Zu hoch (Portrait-Posterframe): oben/unten croppen.
-                                    val cropH = (srcW / targetAspect).toInt().coerceIn(1, srcH)
-                                    val y0 = ((srcH - cropH) / 2).coerceAtLeast(0)
-                                    cropped = android.graphics.Bitmap.createBitmap(bitmap, 0, y0, srcW, cropH)
-                                    if (cropped !== bitmap) bitmap.recycle()
-                                }
-                                val scaledBitmap = if (cropped.width != targetW || cropped.height != targetH) {
-                                    android.graphics.Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
-                                } else {
-                                    cropped
-                                }
-                                if (scaledBitmap !== cropped) cropped.recycle()
-
-                                val argbBitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                                scaledBitmap.recycle()
-                                if (argbBitmap != null) {
-                                    // Ownership is transferred to VideoMlAnalyzer.
-                                    // ML Kit reads InputImage asynchronously, so recycling
-                                    // here is a use-after-recycle on many devices. The analyzer
-                                    // releases it in its onComplete listener (or on any early exit).
-                                    videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.height)
-                                }
-                            }
+                        val handedOff = try {
+                            extractAndSubmitFrame(retriever, currentPos, videoAnalyzer)
                         } catch (e: Exception) {
                             android.util.Log.e("VideoPreview", "Frame extraction failed", e)
+                            false
+                        }
+                        // A retriever that keeps failing (unsupported codec,
+                        // removed file) would otherwise re-try the same frame
+                        // forever.
+                        consecutiveFailures = if (handedOff) 0 else consecutiveFailures + 1
+                        if (consecutiveFailures >= MAX_CONSECUTIVE_FRAME_FAILURES) {
+                            android.util.Log.w(
+                                "VideoPreview",
+                                "giving up on frame extraction after $consecutiveFailures failures"
+                            )
+                            break
                         }
                     }
                 }
+
+                // delay() is both the pacing and the cancellation point: a plain
+                // `while (true)` (or a loop over a Flow super-collector, where
+                // cancellation is not observed until `collect` returns) would
+                // keep running after the composable was disposed.
                 delay(300L)
             }
         } finally {
@@ -254,4 +228,85 @@ private fun startFrameProcessing(
             scope.cancel()
         }
     }
+}
+
+private const val MAX_CONSECUTIVE_FRAME_FAILURES = 5
+
+/**
+ * Extracts one frame, brings it to the analysis geometry and hands it to
+ * [videoAnalyzer]. Returns whether a frame was actually submitted (ownership of
+ * the bitmap transfers to the analyzer, which recycles it).
+ */
+private fun extractAndSubmitFrame(
+    retriever: MediaMetadataRetriever,
+    positionMs: Long,
+    videoAnalyzer: VideoMlAnalyzer
+): Boolean {
+    val bitmap = retriever.getFrameAtTime(
+        positionMs * 1000,
+        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+    ) ?: return false
+
+    // === Bitmap-Lifecycle fix ===
+    // createScaledBitmap gibt das Original zurück
+    // wenn die Maße passen — wir dürfen NICHT das
+    // Original recyclen, weil ExoPlayer es noch
+    // referenziert.
+    //
+    // ASPECT: Der Frame muss seitenrichtig auf
+    // 640x360 gebracht werden — NICHT verzerrt.
+    // Das alte createScaledBitmap(640,360) hat ein
+    // 480x640-Portrait-Posterframe (oder jedes
+    // andere Seitenverhältnis) auf Landscape
+    // gequetscht: alle Kurven/Offsets danach waren
+    // systematisch falsch (VM: Overlay im Himmel).
+    // Wir croppen center auf 16:9 und skalieren
+    // dann — gleiche Geometrie wie der Player.
+    val srcW = bitmap.width
+    val srcH = bitmap.height
+    val targetW = 640
+    val targetH = 360
+    val targetAspect = targetW.toFloat() / targetH
+    val srcAspect = srcW.toFloat() / srcH.coerceAtLeast(1)
+    val cropped: android.graphics.Bitmap
+    if (kotlin.math.abs(srcAspect - targetAspect) < 0.02f) {
+        cropped = bitmap
+    } else if (srcAspect > targetAspect) {
+        // Zu breit: Seiten croppen.
+        val cropW = (srcH * targetAspect).toInt().coerceIn(1, srcW)
+        val x0 = ((srcW - cropW) / 2).coerceAtLeast(0)
+        cropped = android.graphics.Bitmap.createBitmap(bitmap, x0, 0, cropW, srcH)
+        if (cropped !== bitmap) bitmap.recycle()
+    } else {
+        // Zu hoch (Portrait-Posterframe): oben/unten croppen.
+        val cropH = (srcW / targetAspect).toInt().coerceIn(1, srcH)
+        val y0 = ((srcH - cropH) / 2).coerceAtLeast(0)
+        cropped = android.graphics.Bitmap.createBitmap(bitmap, 0, y0, srcW, cropH)
+        if (cropped !== bitmap) bitmap.recycle()
+    }
+    val scaledBitmap = if (cropped.width != targetW || cropped.height != targetH) {
+        android.graphics.Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
+    } else {
+        cropped
+    }
+    if (scaledBitmap !== cropped) cropped.recycle()
+
+    val argbBitmap = scaledBitmap.copy(Bitmap.Config.ARGB_8888, false)
+    scaledBitmap.recycle()
+    if (argbBitmap == null) return false
+
+    // Ownership is transferred to VideoMlAnalyzer.
+    // ML Kit reads InputImage asynchronously, so recycling
+    // here is a use-after-recycle on many devices. The analyzer
+    // releases it in its onComplete listener (or on any early exit).
+    try {
+        videoAnalyzer.analyzeFrame(argbBitmap, argbBitmap.height)
+    } catch (t: Throwable) {
+        // The hand-off failed before the analyzer took ownership — release the
+        // frame here, otherwise every failed hand-off leaks a 640x360 ARGB
+        // bitmap and the loop keeps producing them.
+        if (!argbBitmap.isRecycled) argbBitmap.recycle()
+        throw t
+    }
+    return true
 }
