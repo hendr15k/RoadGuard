@@ -93,6 +93,16 @@ class UfldLaneDetectorTest {
             UfldLaneDetector.MIRROR_CONFIDENCE_CAP < LaneDriftGate.MIN_CONFIDENCE
         )
     }
+
+    @Test
+    fun gridCellMapsToOfficialLanePosition() {
+        // Official UFLD reference: col_sample = linspace(0, 800-1, 100), so one
+        // grid cell is (800-1)/(100-1) px wide, and x = loc * cellW * W/800 - W/1280.
+        // The old code used 800/100 = 8.0 px (a ~1 % / ~10 px systematic bias).
+        val cell = 50
+        val expected = (cell * (799f / 99f) * 1280f / 800f) - 1f
+        assertEquals(expected, UfldLaneDetector.gridCellToLaneX(cell, 1280), 0.01f)
+    }
 }
 
 /**

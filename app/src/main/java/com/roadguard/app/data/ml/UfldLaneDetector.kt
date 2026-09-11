@@ -80,6 +80,19 @@ class UfldLaneDetector(private val context: Context) {
         )
         const val CFG_W = 1280f
         const val CFG_H = 720f
+
+        /**
+         * Map UFLD's 1-based expected grid location to image x.
+         *
+         * The reference decoder uses `linspace(0, INPUT_W - 1, GRIDING_NUM)`,
+         * not INPUT_W / GRIDING_NUM. Keeping the exact sample spacing avoids a
+         * systematic ~1 % outward bias (about 10 px near the right edge at 1280p).
+         */
+        fun gridCellToLaneX(location: Number, imageWidth: Int): Float {
+            val cellWidth = (INPUT_W - 1f) / (GRIDING_NUM - 1f)
+            return location.toFloat() * cellWidth * imageWidth / INPUT_W - imageWidth / CFG_W
+        }
+
         private const val MIN_POINTS = 3
         private const val HOLD_FRAMES = 6
         private const val EMA_ALPHA = 0.6f
@@ -636,12 +649,11 @@ class UfldLaneDetector(private val context: Context) {
                 for (k in 0 until GRIDING_NUM) {
                     loc += (k + 1) * (expVals[k] / sumExp)
                 }
-                // Reference formula in 1280x720 cfg space, then scale to image.
+                // Reference x formula uses linspace(0, INPUT_W-1, GRIDING_NUM).
                 // Row-axis pairing: base=(NUM_ROWS-1-row) reads bottom-up, so the
                 // anchor must use the same axis (NUM_ROWS-1-row).
-                val pxCfg = loc * (800f / GRIDING_NUM) * (CFG_W / 800f) - 1f
-                val pyCfg = CFG_H * (ROW_ANCHORS[NUM_ROWS - 1 - row] / 288f) - 1f
-                xs.add(pxCfg * imgW / CFG_W)
+                val pyCfg = CFG_H * (ROW_ANCHORS[NUM_ROWS - 1 - row] / INPUT_H.toFloat()) - 1f
+                xs.add(gridCellToLaneX(loc, imgW))
                 ys.add(pyCfg * imgH / CFG_H)
             }
             if (xs.size >= MIN_POINTS) {
