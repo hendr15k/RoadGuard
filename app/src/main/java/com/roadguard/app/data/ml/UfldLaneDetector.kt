@@ -189,6 +189,15 @@ class UfldLaneDetector(private val context: Context) {
     /** Last ego pair chosen, so a lane change can reset the temporal state. */
     private var lastPair: Pair<Int, Int>? = null
 
+    /** Bottom share of the frame covered by the hood: excluded from detection. */
+    @Volatile
+    var hoodFraction: Float = LaneGeometry.HOOD_EXCLUSION_FRACTION
+        private set
+
+    fun updateHoodFraction(value: Float) {
+        hoodFraction = value.coerceIn(0f, 0.5f)
+    }
+
     @Synchronized
     fun isLoaded(): Boolean = interpreter != null
 
@@ -433,7 +442,13 @@ class UfldLaneDetector(private val context: Context) {
             val frame = runInference(itp, bitmap)
             // One marking mask per frame, reused by both sides.
             markingMeasurer.buildMarkingMask(frame.pixels, INPUT_W, INPUT_H)
-            val lanes = frame.lanes
+            // Hood first: the configured bottom band is the bonnet, not
+            // road. Clipped before pair/width/offset so hood reflections
+            // never steer them.
+            val hoodFrac = hoodFraction
+            val lanes = Array<LanePoints?>(NUM_LANES) { i ->
+                LaneGeometry.aboveHood(frame.lanes[i], bitmap.height, hoodFrac)
+            }
             // Compare every lane at ONE row. Raw xBottom places each lane at
             // its own lowest decoded depth, so a gap measured that way mixes a
             // near-field and a far-field x — the same "two different rows" bug
@@ -452,7 +467,7 @@ class UfldLaneDetector(private val context: Context) {
                 bitmap.height.toFloat()
             } else {
                 val lowest = decoded.maxOf { it.yBottom }
-                LaneGeometry.evalRow(lowest, lowest, bitmap.height)
+                LaneGeometry.evalRow(lowest, lowest, bitmap.height, hoodFrac)
             }
             val candidates = decoded.map { pts ->
                 val x = LaneGeometry.fitQuadratic(pts.x, pts.y)?.x(commonEvalRow) ?: pts.xBottom
@@ -564,13 +579,13 @@ class UfldLaneDetector(private val context: Context) {
         val scaleY = bitmap.height.toFloat() / INPUT_H
         // Measure in IMAGE pixels; the renderer maps them onto the model-grid
         // mask itself, so the mask is baked once per frame and never per sample.
-        val (deviation, supportBefore) = markingMeasurer.measure(pts.x, pts.y, bitmap.width, bitmap.height)
+        val (deviation, supportBefore) = markingMeasurer.measure(pts.x, pts.y, bitmap.width, bitmap.height, hoodFraction)
         val maxCorrection = LaneOverlayRenderer.SEARCH_FRAC * bitmap.width
         var corrected = pts
         var supportAfter = supportBefore
         if (abs(deviation) > 0.5f && abs(deviation) <= maxCorrection) {
             val nx = FloatArray(pts.size) { i -> (pts.x[i] - deviation).coerceIn(0f, bitmap.width.toFloat()) }
-            val (_, s) = markingMeasurer.measure(nx, pts.y, bitmap.width, bitmap.height)
+            val (_, s) = markingMeasurer.measure(nx, pts.y, bitmap.width, bitmap.height, hoodFraction)
             if (s >= supportBefore) {
                 corrected = LanePoints(nx, pts.y)
                 supportAfter = s
@@ -605,7 +620,8 @@ class UfldLaneDetector(private val context: Context) {
         val evalRow = LaneGeometry.evalRow(
             if (leftOk) left!!.yBottom else frameHeight.toFloat(),
             if (rightOk) right!!.yBottom else frameHeight.toFloat(),
-            frameHeight
+            frameHeight,
+            hoodFraction
         )
         val covL = if (leftOk) LaneGeometry.coverage(left, evalRow, frameHeight, leftSupport) else 0f
         val covR = if (rightOk) LaneGeometry.coverage(right, evalRow, frameHeight, rightSupport) else 0f

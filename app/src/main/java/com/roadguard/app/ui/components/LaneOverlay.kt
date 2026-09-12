@@ -31,19 +31,22 @@ private data class CanvasTransform(
  *   - `true`  → PreviewView FILL_CENTER (camera): uniform scale + centre crop.
  *   - `false` → PlayerView default RESIZE_MODE_FIT (video): uniform scale +
  *     letterbox, so the overlay must use fit semantics or it is drawn offset.
+ * @param hoodFraction bottom share of the frame the car hood occupies. It is
+ *   dimmed and marked so the user can see what is excluded from detection.
  */
 @Composable
 fun LaneOverlay(
     laneInfo: LaneInfo?,
     modifier: Modifier = Modifier,
-    fillCenter: Boolean = true
+    fillCenter: Boolean = true,
+    hoodFraction: Float = 0f
 ) {
     Canvas(modifier = modifier) {
-        laneInfo?.let { drawLaneOverlay(it, fillCenter) }
+        laneInfo?.let { drawLaneOverlay(it, fillCenter, hoodFraction) }
     }
 }
 
-private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean) {
+private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean, hoodFraction: Float) {
     val canvasW = size.width
     val canvasH = size.height
     if (canvasW <= 0f || canvasH <= 0f) return
@@ -73,6 +76,8 @@ private fun DrawScope.drawLaneOverlay(laneInfo: LaneInfo, fillCenter: Boolean) {
     }
 
     drawHorizon(canvasW, canvasH, baseColor.copy(alpha = 0.25f))
+
+    drawHoodZone(canvasW, videoTop, videoBottom, baseColor, hoodFraction)
 
     if (hasLeft && hasRight) {
         drawLaneArea(
@@ -317,6 +322,41 @@ private fun DrawScope.drawHorizon(canvasW: Float, canvasH: Float, color: Color) 
         end = Offset(canvasW, y),
         strokeWidth = 1.5f
     )
+}
+
+/**
+ * Dims the hood band at the bottom of the video rect: this strip is the car's
+ * own bonnet, not road, and is excluded from lane detection. The dashed
+ * edge shows the user exactly where their hoodFraction setting cuts. Uses the
+ * video rect (not the canvas) so it stays inside the letterbox of FIT mode.
+ */
+private fun DrawScope.drawHoodZone(
+    canvasW: Float,
+    videoTop: Float,
+    videoBottom: Float,
+    color: Color,
+    hoodFraction: Float
+) {
+    val frac = hoodFraction.coerceIn(0f, 0.5f)
+    if (frac <= 0f || videoBottom <= videoTop) return
+    val topY = videoTop + (videoBottom - videoTop) * (1f - frac)
+    drawRect(
+        color = Color.Black.copy(alpha = 0.45f),
+        topLeft = Offset(0f, topY),
+        size = androidx.compose.ui.geometry.Size(canvasW, videoBottom - topY)
+    )
+    val dashW = 18f
+    val gapW = 12f
+    var x = 0f
+    while (x < canvasW) {
+        drawLine(
+            color = color.copy(alpha = 0.8f),
+            start = Offset(x, topY),
+            end = Offset(minOf(x + dashW, canvasW), topY),
+            strokeWidth = 3f
+        )
+        x += dashW + gapW
+    }
 }
 
 private fun DrawScope.drawUncertaintyIndicator(canvasW: Float, canvasH: Float, color: Color) {

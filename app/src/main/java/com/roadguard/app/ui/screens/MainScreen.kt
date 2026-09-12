@@ -201,9 +201,10 @@ fun MainScreen(
         viewModel.consumeAlertSignal()
     }
 
-    LaunchedEffect(videoAnalyzer, settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity) {
+    LaunchedEffect(videoAnalyzer, settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity, settings.hoodFraction) {
         videoAnalyzer?.updateVehicleThreshold(settings.minFollowingDistanceMeters)
         videoAnalyzer?.updateLaneSensitivity(settings.laneDepartureSensitivity)
+        videoAnalyzer?.updateHoodFraction(settings.hoodFraction)
     }
 
     LaunchedEffect(videoAnalyzer) {
@@ -228,7 +229,8 @@ fun MainScreen(
                     LaneOverlay(
                         laneInfo = laneInfo,
                         modifier = Modifier.fillMaxSize(),
-                        fillCenter = false
+                        fillCenter = false,
+                        hoodFraction = settings.hoodFraction
                     )
 
                     WarningOverlay(
@@ -275,7 +277,8 @@ fun MainScreen(
 
                 LaneOverlay(
                     laneInfo = laneInfo,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    hoodFraction = settings.hoodFraction
                 )
 
                 WarningOverlay(
@@ -369,9 +372,10 @@ fun CameraPreview(
         MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext)
     }
 
-    LaunchedEffect(settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity) {
+    LaunchedEffect(settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity, settings.hoodFraction) {
         mlAnalyzer.updateVehicleThreshold(settings.minFollowingDistanceMeters)
         mlAnalyzer.updateLaneSensitivity(settings.laneDepartureSensitivity)
+        mlAnalyzer.updateHoodFraction(settings.hoodFraction)
     }
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }

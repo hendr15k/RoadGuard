@@ -57,6 +57,14 @@ class LaneDetector(
     fun updateSensitivity(value: Float) {
         sensitivity = value.coerceIn(0f, 1f)
     }
+
+    /** Bottom share of the frame covered by the hood: excluded from detection. */
+    @Volatile
+    private var hoodFraction: Float = 0f
+
+    fun updateHoodFraction(value: Float) {
+        hoodFraction = value.coerceIn(0f, 0.5f)
+    }
     data class LaneLine(
         val x1: Float, val y1: Float,
         val x2: Float, val y2: Float,
@@ -274,14 +282,13 @@ class LaneDetector(
             ensureCapacity(scratchEdges, pixelCount).also { scratchEdges = it },
             birdW, birdH
         )
+        val roiTop = (birdH * 0.15).toInt()
+        val roiBottom = (birdH - birdH * hoodFraction).toInt().coerceAtLeast(roiTop + 1)
         val roadMask = createRoadMask(
             birdEye, birdColor,
             ensureCapacity(scratchRoadMask, pixelCount).also { scratchRoadMask = it },
-            birdW, birdH
+            birdW, birdH, roiBottom
         )
-        
-        val roiTop = (birdH * 0.15).toInt()
-        val roiBottom = birdH
 
         // Ego-lane pair selection: evaluate all left/right candidates and pick
         // the pair straddling the vehicle center with plausible width. Falls
@@ -308,7 +315,7 @@ class LaneDetector(
 
         val leftValid = leftLane?.valid == true
         val rightValid = rightLane?.valid == true
-        val confidence = calculateConfidence(leftValid, rightValid, roadMask, birdW, birdH, roiTop)
+        val confidence = calculateConfidence(leftValid, rightValid, roadMask, birdW, birdH, roiTop, roiBottom)
 
         val leftOrig = leftLane?.let { scaleLine(it, scaleX, scaleY) }
         val rightOrig = rightLane?.let { scaleLine(it, scaleX, scaleY) }
@@ -418,14 +425,13 @@ class LaneDetector(
             ensureCapacity(scratchEdges, pixelCount).also { scratchEdges = it },
             birdW, birdH
         )
+        val roiTop = (birdH * 0.15).toInt()
+        val roiBottom = (birdH - birdH * hoodFraction).toInt().coerceAtLeast(roiTop + 1)
         val roadMask = createRoadMask(
             birdEye, null,
             ensureCapacity(scratchRoadMask, pixelCount).also { scratchRoadMask = it },
-            birdW, birdH
+            birdW, birdH, roiBottom
         )
-        
-        val roiTop = (birdH * 0.15).toInt()
-        val roiBottom = birdH
 
         val pair = detectEgoLanePair(edges, roadMask, birdW, birdH, roiTop, roiBottom)
         val leftLane: LaneLine?
@@ -449,7 +455,7 @@ class LaneDetector(
 
         val leftValid = leftLane?.valid == true
         val rightValid = rightLane?.valid == true
-        val confidence = calculateConfidence(leftValid, rightValid, roadMask, birdW, birdH, roiTop)
+        val confidence = calculateConfidence(leftValid, rightValid, roadMask, birdW, birdH, roiTop, roiBottom)
 
         val leftOrig = leftLane?.let { scaleLine(it, scaleX, scaleY) }
         val rightOrig = rightLane?.let { scaleLine(it, scaleX, scaleY) }
@@ -528,11 +534,16 @@ class LaneDetector(
         val rawVpY = detectVanishingPoint(w, h)
         vpYRatio = vpYRatio * 0.85f + (rawVpY / h) * 0.15f
         val vpY = (vpYRatio * h).coerceIn(h * 0.35f, h * 0.65f)
+        // The trapezoid's bottom corners sit at the hood edge, not at the
+        // frame bottom: mapping the bonnet into the bird's-eye view smeared
+        // hood texture across the near field and biased the histogram peaks.
+        // Capped at the historic 0.98 so hood=0 keeps the old geometry.
+        val bottomY = h * minOf(0.98f, 1f - hoodFraction.coerceIn(0f, 0.5f))
         val srcPoints = floatArrayOf(
             w * 0.42f, vpY,
             w * 0.58f, vpY,
-            w * 0.95f, h * 0.98f,
-            w * 0.05f, h * 0.98f
+            w * 0.95f, bottomY,
+            w * 0.05f, bottomY
         )
 
         // Destination: rectangle in bird's-eye view (top-down)
@@ -880,18 +891,19 @@ class LaneDetector(
         return dst
     }
 
-    private fun createRoadMask(gray: IntArray, colorMaskBev: IntArray?, mask: IntArray, w: Int, h: Int): IntArray {
+    private fun createRoadMask(gray: IntArray, colorMaskBev: IntArray?, mask: IntArray, w: Int, h: Int, bottom: Int = h): IntArray {
         Arrays.fill(mask, 0, w * h, 0)
 
         val roiTop = (h * 0.05).toInt()
+        val roiBottom = bottom.coerceIn(roiTop + 1, h)
 
-        if (roiTop >= h) return mask
+        if (roiTop >= roiBottom) return mask
 
-        val sampleStep = max(1, ((h - roiTop) * w) / 8000)
+        val sampleStep = max(1, ((roiBottom - roiTop) * w) / 8000)
         var sumBright = 0L
         var countSample = 0
         var i = 0
-        val totalRoadPixels = (h - roiTop) * w
+        val totalRoadPixels = (roiBottom - roiTop) * w
         while (i < totalRoadPixels) {
             val y = roiTop + i / w
             val x = i % w
@@ -915,8 +927,8 @@ class LaneDetector(
         val stdDev = sqrt((sumSq.toDouble() / countSample)).toInt()
         val brightnessThresh = (meanBright + stdDev * 2).coerceIn(100, 200)
 
-        for (y in roiTop until h) {
-            val rowProgress = (y - roiTop).toFloat() / (h - roiTop)
+        for (y in roiTop until roiBottom) {
+            val rowProgress = (y - roiTop).toFloat() / (roiBottom - roiTop)
 
             val leftEdge = (w * (0.08f + 0.1f * rowProgress)).toInt()
             val rightEdge = (w * (0.92f - 0.1f * rowProgress)).toInt()
@@ -930,7 +942,7 @@ class LaneDetector(
                     // Dilate the mask by one row so a single-pixel thinning gap
                     // (and breaking the sliding-window centroid up) disappears.
                     if (y > roiTop) mask[(y - 1) * w + x] = max(mask[(y - 1) * w + x], 1)
-                    if (y < h - 1) mask[(y + 1) * w + x] = max(mask[(y + 1) * w + x], 1)
+                    if (y < roiBottom - 1) mask[(y + 1) * w + x] = max(mask[(y + 1) * w + x], 1)
                 }
             }
         }
@@ -1389,14 +1401,14 @@ class LaneDetector(
 
     private fun calculateConfidence(
         leftValid: Boolean, rightValid: Boolean,
-        mask: IntArray, w: Int, h: Int, roiTop: Int
+        mask: IntArray, w: Int, h: Int, roiTop: Int, roiBottom: Int = h
     ): Float {
         if (!leftValid && !rightValid) return 0.15f
         
         var maskCount = 0
         var totalPixels = 0
         
-        for (y in roiTop until h) {
+        for (y in roiTop until roiBottom.coerceIn(roiTop + 1, h)) {
             for (x in 0 until w) {
                 totalPixels++
                 if (mask[y * w + x] > 0) maskCount++

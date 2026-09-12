@@ -2,6 +2,7 @@ package com.roadguard.app.data.ml
 
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Lane-marking measurement: how well a detected curve sits on the actual
@@ -35,7 +36,7 @@ class LaneOverlayRenderer {
 
         /** Fraction of the curve (from mid-frame downwards) that is measured. */
         const val SAMPLE_FROM = 0.5f
-        const val SAMPLE_TO = 0.96f
+        const val SAMPLE_TO = 0.90f
     }
 
     private var mask = BooleanArray(0)
@@ -74,17 +75,27 @@ class LaneOverlayRenderer {
      * Returns (0, 0) when the curve cannot be measured, which callers treat as
      * "no evidence" rather than "perfectly aligned".
      */
-    fun measure(xs: FloatArray, ys: FloatArray, frameWidth: Int, frameHeight: Int): Pair<Float, Float> {
+    fun measure(
+        xs: FloatArray,
+        ys: FloatArray,
+        frameWidth: Int,
+        frameHeight: Int,
+        hoodFraction: Float = 0.08f
+    ): Pair<Float, Float> {
         if (xs.size < 4 || xs.size != ys.size || maskW <= 0 || maskH <= 0) return Pair(0f, 0f)
         val sx = maskW.toFloat() / frameWidth
         val sy = maskH.toFloat() / frameHeight
         val window = max(6f, SEARCH_FRAC * frameWidth)
+        // Samples spread between mid-frame and the hood edge: clamping each
+        // target to the hood top would pile them onto one row instead.
+        val from = SAMPLE_FROM * frameHeight.toFloat()
+        val to = min(SAMPLE_TO * frameHeight.toFloat(), frameHeight * (1f - hoodFraction.coerceIn(0f, 0.5f)) - 2f)
+        if (to <= from) return Pair(0f, 0f)
         val deviations = ArrayList<Float>(SAMPLE_COUNT)
         var samples = 0
         var hits = 0
         for (s in 0 until SAMPLE_COUNT) {
-            val f = SAMPLE_FROM + (SAMPLE_TO - SAMPLE_FROM) * s / (SAMPLE_COUNT - 1)
-            val targetY = frameHeight * f
+            val targetY = from + (to - from) * s / (SAMPLE_COUNT - 1)
             var bestIdx = 0
             var bestDist = Float.MAX_VALUE
             for (j in ys.indices) {

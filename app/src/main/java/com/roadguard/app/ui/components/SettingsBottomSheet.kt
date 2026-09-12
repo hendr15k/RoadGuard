@@ -161,6 +161,31 @@ private fun SettingsPage(
                 "and escalates after 3 repeats."
         )
 
+        Spacer(modifier = Modifier.height(16.dp))
+
+        var hoodValue by remember { mutableStateOf(settings.hoodFraction) }
+        LaunchedEffect(settings.hoodFraction) {
+            hoodValue = settings.hoodFraction
+        }
+        Text(
+            String.format(Locale.US, "Hood zone: %.0f%%", hoodValue * 100f)
+        )
+        Slider(
+            value = hoodValue,
+            onValueChange = { hoodValue = it },
+            onValueChangeFinished = {
+                onSettingsUpdate(settings.copy(hoodFraction = hoodValue))
+            },
+            valueRange = AppSettings.MIN_HOOD_FRACTION..AppSettings.MAX_HOOD_FRACTION,
+            steps = 24
+        )
+        HelpText(
+            "Bottom of the camera image covered by your car's hood. " +
+                "That band is dimmed in the preview and ignored by lane " +
+                "detection, so hood edges/reflections are not read as road. " +
+                "Raise it until the shaded zone matches your bonnet."
+        )
+
         Spacer(modifier = Modifier.height(4.dp))
         Button(
             onClick = { onSettingsUpdate(settings.copy(alertRepeatSeconds = 3f)) },

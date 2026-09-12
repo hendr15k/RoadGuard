@@ -8,7 +8,13 @@ data class AppSettings(
     val minFollowingDistanceMeters: Float = 20f,
     val laneDepartureSensitivity: Float = 0.5f,
     /** Minimum seconds between repeated alarms for the same ongoing hazard. */
-    val alertRepeatSeconds: Float = 3f
+    val alertRepeatSeconds: Float = 3f,
+    /**
+     * Bottom share of the camera frame occupied by the car's own hood/bonnet.
+     * The camera sits behind the windshield, so this strip is excluded from
+     * lane detection: reflections/edges on the hood must not be read as road.
+     */
+    val hoodFraction: Float = DEFAULT_HOOD_FRACTION
 ) {
     companion object {
         const val MIN_FOLLOWING_DISTANCE_M = 10f
@@ -17,6 +23,11 @@ data class AppSettings(
         const val MAX_SENSITIVITY = 1f
         const val MIN_REPEAT_SECONDS = 0.5f
         const val MAX_REPEAT_SECONDS = 5f
+
+        /** Default hood band; matches the marker the overlay used to draw. */
+        const val DEFAULT_HOOD_FRACTION = 0.08f
+        const val MIN_HOOD_FRACTION = 0f
+        const val MAX_HOOD_FRACTION = 0.25f
     }
 }
 
@@ -38,5 +49,9 @@ fun AppSettings.sanitized(): AppSettings = copy(
     alertRepeatSeconds = alertRepeatSeconds.coerceIn(
         AppSettings.MIN_REPEAT_SECONDS,
         AppSettings.MAX_REPEAT_SECONDS
+    ),
+    hoodFraction = hoodFraction.coerceIn(
+        AppSettings.MIN_HOOD_FRACTION,
+        AppSettings.MAX_HOOD_FRACTION
     )
 )

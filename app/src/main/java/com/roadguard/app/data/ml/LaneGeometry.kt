@@ -39,6 +39,48 @@ object LaneGeometry {
     /** Row the ego-lane offset is evaluated at (bottom of the frame). */
     const val EVAL_ROW_FRACTION = 0.98f
 
+    /**
+     * Bottom of the frame covered by the car's own hood/bonnet. The camera
+     * sits behind the windshield, so the lowest band of the image is the
+     * hood, not the road: lane points down there are reflections or the
+     * hood edge, and the offset must never be measured on them. The value
+     * is user-configurable (Settings → Hood zone) and defaults to 8 %.
+     */
+    const val HOOD_EXCLUSION_FRACTION = 0.08f
+
+    /** First row that is still road: everything at or below is hood. */
+    fun hoodTop(frameHeight: Int, fraction: Float = HOOD_EXCLUSION_FRACTION): Float =
+        frameHeight * (1f - fraction.coerceIn(0f, 0.5f))
+
+    /**
+     * Drop decoded points sitting on the hood. Returns null when fewer than
+     * three road points survive — a hood-only fragment is not a lane.
+     */
+    fun aboveHood(
+        pts: UfldLaneDetector.LanePoints?,
+        frameHeight: Int,
+        fraction: Float = HOOD_EXCLUSION_FRACTION
+    ): UfldLaneDetector.LanePoints? {
+        if (pts == null || frameHeight <= 0) return pts
+        if (fraction <= 0f) return pts
+        val top = hoodTop(frameHeight, fraction)
+        var keep = 0
+        for (y in pts.y) if (y < top) keep++
+        if (keep == pts.size) return pts
+        if (keep < 3) return null
+        val nx = FloatArray(keep)
+        val ny = FloatArray(keep)
+        var k = 0
+        for (i in 0 until pts.size) {
+            if (pts.y[i] < top) {
+                nx[k] = pts.x[i]
+                ny[k] = pts.y[i]
+                k++
+            }
+        }
+        return UfldLaneDetector.LanePoints(nx, ny, pts.index)
+    }
+
     /** Fit residual above this (px) is an outlier row, not lane detail. */
     const val FIT_OUTLIER_PX = 25f
 
@@ -190,10 +232,18 @@ object LaneGeometry {
         return cov * penalty * (0.6f + 0.4f * markingSupport.coerceIn(0f, 1f))
     }
 
-    /** Row both boundaries are evaluated at: as low as the data supports. */
-    fun evalRow(leftBotY: Float, rightBotY: Float, frameHeight: Int): Float {
+    /**
+     * Row both boundaries are evaluated at: as low as the data supports, never
+     * on the hood. [fraction] is the configurable hood band.
+     */
+    fun evalRow(
+        leftBotY: Float,
+        rightBotY: Float,
+        frameHeight: Int,
+        fraction: Float = HOOD_EXCLUSION_FRACTION
+    ): Float {
         val lo = min(
-            EVAL_ROW_FRACTION * frameHeight,
+            min(EVAL_ROW_FRACTION * frameHeight, hoodTop(frameHeight, fraction)),
             max(leftBotY, rightBotY)
         )
         return max(lo, 0.5f * frameHeight)

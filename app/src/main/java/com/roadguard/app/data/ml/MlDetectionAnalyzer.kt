@@ -32,6 +32,16 @@ class MlDetectionAnalyzer(
         laneDetector.updateSensitivity(value)
     }
 
+    /** Bottom share of the frame occupied by the car hood; excluded from detection. */
+    @Volatile
+    private var hoodFraction: Float = 0.08f
+
+    fun updateHoodFraction(value: Float) {
+        hoodFraction = value
+        laneDetector.updateHoodFraction(value)
+        ufldDetector?.updateHoodFraction(value)
+    }
+
     private val objectDetector: ObjectDetector = ObjectDetection.getClient(
         ObjectDetectorOptions.Builder()
             .setDetectorMode(ObjectDetectorOptions.SINGLE_IMAGE_MODE)
@@ -129,9 +139,15 @@ class MlDetectionAnalyzer(
     private val modelLock = Any()
 
     private fun ensureUfldLoaded(): UfldLaneDetector? {
-        ufldDetector?.takeIf { it.isLoaded() }?.let { return it }
+        ufldDetector?.takeIf { it.isLoaded() }?.let {
+            it.updateHoodFraction(hoodFraction)
+            return it
+        }
         synchronized(modelLock) {
-            ufldDetector?.takeIf { it.isLoaded() }?.let { return it }
+            ufldDetector?.takeIf { it.isLoaded() }?.let {
+                it.updateHoodFraction(hoodFraction)
+                return it
+            }
             // Retry with cooldown instead of a one-shot flag: a model
             // downloaded later (or a transient load failure) previously
             // needed a full process restart to take effect.
@@ -144,7 +160,9 @@ class MlDetectionAnalyzer(
                 e.printStackTrace()
             }
         }
-        return ufldDetector?.takeIf { it.isLoaded() }
+        return ufldDetector?.takeIf { it.isLoaded() }?.also {
+            it.updateHoodFraction(hoodFraction)
+        }
     }
 
     @SuppressLint("UnsafeOptInUsageError")

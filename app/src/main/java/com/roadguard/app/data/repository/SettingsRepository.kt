@@ -24,6 +24,7 @@ class SettingsRepository @Inject constructor(
         private const val KEY_MIN_FOLLOWING_DISTANCE = "min_following_distance"
         private const val KEY_LANE_SENSITIVITY = "lane_departure_sensitivity"
         private const val KEY_ALERT_REPEAT = "alert_repeat_seconds"
+        private const val KEY_HOOD_FRACTION = "hood_fraction"
     }
 
     // SharedPreferences ist bereits thread-safe, aber unser _settings State
@@ -44,7 +45,8 @@ class SettingsRepository @Inject constructor(
         vibrationAlertsEnabled = prefs.getBoolean(KEY_VIBRATION_ALERTS, true),
         minFollowingDistanceMeters = prefs.getFloat(KEY_MIN_FOLLOWING_DISTANCE, 20f),
         laneDepartureSensitivity = prefs.getFloat(KEY_LANE_SENSITIVITY, 0.5f),
-        alertRepeatSeconds = prefs.getFloat(KEY_ALERT_REPEAT, 3f)
+        alertRepeatSeconds = prefs.getFloat(KEY_ALERT_REPEAT, 3f),
+        hoodFraction = prefs.getFloat(KEY_HOOD_FRACTION, AppSettings.DEFAULT_HOOD_FRACTION)
     ).sanitized()
 
     // Deprecated entry point — kept for backwards compat with
@@ -71,6 +73,7 @@ class SettingsRepository @Inject constructor(
             .putFloat(KEY_MIN_FOLLOWING_DISTANCE, safe.minFollowingDistanceMeters)
             .putFloat(KEY_LANE_SENSITIVITY, safe.laneDepartureSensitivity)
             .putFloat(KEY_ALERT_REPEAT, safe.alertRepeatSeconds)
+            .putFloat(KEY_HOOD_FRACTION, safe.hoodFraction)
             .apply()
     }
 }

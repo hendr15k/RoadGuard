@@ -236,8 +236,9 @@ class EgoLaneGeometryTest {
     fun evalRowIsTheLowestSupportedRow() {
         // Both curves decoded down to 500: evaluate there, not at 98 % of 720.
         assertEquals(500f, LaneGeometry.evalRow(500f, 480f, 720), 0.01f)
-        // A curve that reaches the frame bottom: evaluate at 98 %.
-        assertEquals(0.98f * 720f, LaneGeometry.evalRow(719f, 710f, 720), 0.01f)
+        // A curve that reaches the frame bottom is capped at the hood edge,
+        // so the offset is never read off the car's own bonnet.
+        assertEquals(LaneGeometry.hoodTop(720), LaneGeometry.evalRow(719f, 710f, 720), 0.01f)
         // Never above half the frame.
         assertEquals(360f, LaneGeometry.evalRow(10f, 20f, 720), 0.01f)
     }
