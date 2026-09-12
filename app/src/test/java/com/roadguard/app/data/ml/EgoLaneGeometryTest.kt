@@ -198,6 +198,22 @@ class EgoLaneGeometryTest {
     }
 
     @Test
+    fun curveOfUsesTheRobustFitAndRejectsStubs() {
+        val stub = UfldLaneDetector.LanePoints(
+            floatArrayOf(100f, 102f, 104f),
+            floatArrayOf(400f, 410f, 420f)
+        )
+        assertTrue(LaneGeometry.curveOf(stub, 720).valid.not())
+
+        val ys = FloatArray(20) { 300f + it * 15f }
+        val xs = FloatArray(20) { i -> 0.1f * ys[i] + 100f }
+        xs[7] += 400f                       // one badly decoded row
+        val curve = LaneGeometry.curveOf(UfldLaneDetector.LanePoints(xs, ys), 720)
+        assertTrue(curve.valid)
+        assertEquals(100f, curve.c, 5f)
+    }
+
+    @Test
     fun coverageFallsWithExtrapolationBelowTheLastDecodedRow() {
         // A curve that stops at 70 % of the frame but is evaluated at 98 %:
         // half the span is invented and the confidence must say so.

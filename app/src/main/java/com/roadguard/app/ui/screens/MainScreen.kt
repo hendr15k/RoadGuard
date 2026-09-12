@@ -14,9 +14,12 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import android.view.WindowManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
@@ -44,8 +47,12 @@ import com.roadguard.app.domain.model.AlertPhase
 import com.roadguard.app.domain.model.AlertPolicy
 import com.roadguard.app.domain.model.AlertSignal
 import com.roadguard.app.domain.model.AlertState
+import com.roadguard.app.domain.model.AlertLogEntry
+import com.roadguard.app.domain.model.DriveSessionStats
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.domain.model.isFresh
+import com.roadguard.app.ui.audio.AlertTonePlayer
+import com.roadguard.app.ui.audio.soundFor
 import com.roadguard.app.ui.components.LaneOverlay
 import com.roadguard.app.ui.components.SettingsBottomSheet
 import com.roadguard.app.ui.components.UpdateBanner
@@ -136,11 +143,23 @@ fun MainScreen(
             }
         }
     }
+    // Keep the display awake: a driving-safety app that lets the screen time out
+    // mid-drive is silently useless. Released when MainScreen leaves the tree.
+    val activity = context as? android.app.Activity
+    DisposableEffect(activity) {
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     val laneInfo by viewModel.laneInfo.collectAsState()
     val vehicleDistance by viewModel.vehicleDistance.collectAsState()
     val alertState by viewModel.alertState.collectAsState()
     val alertSignal by viewModel.alertSignal.collectAsState()
     val settings by viewModel.settings.collectAsState()
+    val sessionStats by viewModel.sessionStats.collectAsState()
+    val alertHistory by viewModel.alertHistory.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
@@ -159,12 +178,26 @@ fun MainScreen(
         }
     }
 
+    // The ToneGenerator lives here — not inside playAlert() — because creating
+    // one per alarm would allocate a native AudioTrack on every repeat while a
+    // hazard persists. It is released when MainScreen leaves the composition.
+    val tonePlayer = remember { AlertTonePlayer() }
+    DisposableEffect(tonePlayer) {
+        onDispose { tonePlayer.release() }
+    }
+
     // Haptik/Audio nur noch auf dem entprellten Signal — nicht mehr pro Frame.
     // consumeAlertSignal() verhindert, dass dieselbe Emission beim nächsten
     // Recompose erneut vibriert.
-    LaunchedEffect(alertSignal) {
+    LaunchedEffect(alertSignal, settings.audioAlertsEnabled, settings.vibrationAlertsEnabled) {
         val signal = alertSignal ?: return@LaunchedEffect
-        playAlert(context, signal)
+        playAlert(
+            context,
+            signal,
+            tonePlayer,
+            playSound = settings.audioAlertsEnabled,
+            vibrate = settings.vibrationAlertsEnabled
+        )
         viewModel.consumeAlertSignal()
     }
 
@@ -209,6 +242,7 @@ fun MainScreen(
                         vehicleDistance = vehicleDistance,
                         alertState = alertState,
                         distanceThreshold = settings.minFollowingDistanceMeters,
+                        sessionStats = sessionStats,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .padding(top = 48.dp)
@@ -255,6 +289,7 @@ fun MainScreen(
                     vehicleDistance = vehicleDistance,
                     alertState = alertState,
                     distanceThreshold = settings.minFollowingDistanceMeters,
+                    sessionStats = sessionStats,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 48.dp)
@@ -294,10 +329,16 @@ fun MainScreen(
         }
 
         if (showSettings) {
+            var settingsPage by remember { mutableStateOf(0) }
             SettingsBottomSheet(
                 settings = settings,
                 onSettingsUpdate = viewModel::updateSettings,
-                onDismiss = { showSettings = false }
+                onDismiss = { showSettings = false },
+                page = settingsPage,
+                onPageChange = { settingsPage = it },
+                sessionStats = sessionStats,
+                alertHistory = alertHistory,
+                onResetSession = viewModel::resetSession
             )
         }
 
@@ -429,7 +470,22 @@ fun WarningOverlay(
     // CONFIRMING-Frame darf nicht blinken. So bleibt die Anzeige ruhig bis
     // das Gate wirklich feuert.
     val warning = (alertState as? AlertState.Warning)?.takeIf { it.phase == AlertPhase.ACTIVE }
+    // Escalated collisions flash so a driver glancing from the road cannot miss
+    // them: the system time (not a remembered value) drives the pulse, so the
+    // flash keeps running while the HUD holds the same warning.
+    val urgent = warning?.let { it.repeatCount >= AlertPolicy.ESCALATION_REPEATS && it.type is WarningType.ForwardCollision } ?: false
+    // The tick re-emits on its own; keying the pulse on a plain clock read would
+    // freeze — a held warning produces no further recomposition.
+    val pulseNow = rememberFreshnessTick(periodMs = 200L)
+    val pulseOn = urgent && (pulseNow / 400L) % 2L == 0L
     Box(modifier = modifier) {
+        if (urgent) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(DangerRed.copy(alpha = if (pulseOn) 0.18f else 0.06f))
+            )
+        }
         when (warning?.type) {
             is WarningType.LaneDepartureLeft -> LaneWarningIndicator(
                 isLeft = true,
@@ -448,6 +504,7 @@ fun WarningOverlay(
             ForwardCollisionWarning(
                 distance = dist.distanceMeters,
                 ttc = dist.timeToCollision,
+                urgent = urgent,
                 modifier = Modifier.align(Alignment.Center)
             )
         }
@@ -492,19 +549,20 @@ fun LaneWarningIndicator(isLeft: Boolean, modifier: Modifier = Modifier) {
 fun ForwardCollisionWarning(
     distance: Float,
     ttc: Float,
+    urgent: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
             .background(
-                color = DangerRed.copy(alpha = 0.9f),
+                color = DangerRed.copy(alpha = if (urgent) 1f else 0.9f),
                 shape = RoundedCornerShape(16.dp)
             )
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "COLLISION WARNING",
+            text = if (urgent) "COLLISION — BRAKE" else "COLLISION WARNING",
             color = Color.White,
             style = MaterialTheme.typography.headlineSmall
         )
@@ -531,7 +589,8 @@ fun StatusBar(
     vehicleDistance: com.roadguard.app.domain.model.VehicleDistance?,
     alertState: AlertState,
     modifier: Modifier = Modifier,
-    distanceThreshold: Float = 20f
+    distanceThreshold: Float = 20f,
+    sessionStats: DriveSessionStats = DriveSessionStats()
 ) {
     // A stale sample must disappear from the HUD, not just from the alarm: a
     // paused video or a stalled pipeline left the last "DIST 12.4m / TTC 1.8s"
@@ -640,6 +699,33 @@ fun StatusBar(
             }
         }
 
+        // Drive score — one number for "how is this drive going".
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("SCORE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+            val score = sessionStats.safetyScore
+            Text(
+                "$score",
+                color = when {
+                    score >= 80 -> SafeGreen
+                    score >= 50 -> WarningYellow
+                    else -> DangerRed
+                },
+                style = MaterialTheme.typography.titleSmall
+            )
+        }
+
+        // Incident tally (lane departures + collisions).
+        if (sessionStats.totalIncidents > 0) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("INCIDENTS", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(
+                    "${sessionStats.totalIncidents}",
+                    color = if (sessionStats.collisionCount > 0) DangerRed else WarningYellow,
+                    style = MaterialTheme.typography.titleSmall
+                )
+            }
+        }
+
         // Gate phase indicator (CONFIRMING = gelb, ACTIVE = rot)
         (alertState as? AlertState.Warning)?.let { warning ->
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -686,7 +772,21 @@ fun PermissionRequest(
     }
 }
 
-private fun playAlert(context: Context, signal: AlertSignal) {
+private fun playAlert(
+    context: Context,
+    signal: AlertSignal,
+    tonePlayer: AlertTonePlayer? = null,
+    playSound: Boolean = true,
+    vibrate: Boolean = true
+) {
+    if (playSound) {
+        try {
+            tonePlayer?.play(soundFor(signal))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    if (!vibrate) return
     try {
         val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager

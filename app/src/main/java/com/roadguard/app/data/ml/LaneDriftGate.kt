@@ -128,3 +128,43 @@ object LaneDriftGate {
     ): Boolean = confidence > MIN_CONFIDENCE && leftCurveValid && rightCurveValid &&
         historySize >= MIN_HISTORY
 }
+
+/**
+ * Temporal median window for a stream of centre offsets.
+ *
+ * Shared by both analyzers for the classic-CV fallback, which previously used
+ * [LaneDetector]'s per-frame threshold and could warn on a single noisy frame —
+ * the exact failure the [LaneDriftGate] history floor exists to prevent. Keeping
+ * the window here (rather than inline in each analyzer) gives the camera and
+ * video paths identical behaviour.
+ */
+class LaneOffsetWindow(private val windowSize: Int = DEFAULT_WINDOW) {
+
+    companion object {
+        /** ~1.4 s at the 5 Hz analyzer rate, matching the UFLD offset median. */
+        const val DEFAULT_WINDOW = 7
+    }
+
+    private val history = ArrayDeque<Float>()
+
+    /** Number of samples collected so far, for the gate's history floor. */
+    val size: Int get() = history.size
+
+    fun reset() {
+        history.clear()
+    }
+
+    /** Adds a raw offset and returns the current temporal median (or the sample). */
+    fun add(rawOffset: Float): Float {
+        if (!rawOffset.isFinite()) return median()
+        history.addLast(rawOffset)
+        while (history.size > windowSize) history.removeFirst()
+        return median()
+    }
+
+    private fun median(): Float {
+        if (history.isEmpty()) return 0f
+        val sorted = history.sorted()
+        return sorted[sorted.size / 2]
+    }
+}

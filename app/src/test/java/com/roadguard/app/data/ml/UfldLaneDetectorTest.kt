@@ -86,6 +86,33 @@ class UfldLaneDetectorTest {
     }
 
     @Test
+    fun singleSideIgnoresAStubEvenWhenItIsLonger() {
+        // A tall curb fragment on the right must not win the fallback by point
+        // count: the overlay span-gates it away, and the geometry path must
+        // agree with what is drawn.
+        val stub = UfldLaneDetector.LanePoints(
+            floatArrayOf(1000f, 1002f, 1004f, 1006f, 1007f, 1009f, 1011f, 1013f, 1015f),
+            floatArrayOf(400f, 405f, 410f, 415f, 420f, 425f, 430f, 435f, 440f)
+        )
+        val real = line(467f, 300f)
+        val lanes = arrayOf<UfldLaneDetector.LanePoints?>(null, real, stub, null)
+        // Frame 720 high: the 40 px stub fails the span gate, so the right
+        // side offers nothing and the pair rules say left-only.
+        val found = UfldLaneDetectorForTest().singleSideLane(lanes, 1280, 720)
+        assertNotNull(found)
+        assertEquals("L", found!!.first)
+    }
+
+    @Test
+    fun singleSideEmptyWhenOnlyAStubIsVisible() {
+        val stub = UfldLaneDetector.LanePoints(
+            floatArrayOf(1000f, 1002f, 1004f),
+            floatArrayOf(400f, 410f, 420f)
+        )
+        val lanes = arrayOf<UfldLaneDetector.LanePoints?>(null, null, stub, null)
+        assertNull(UfldLaneDetectorForTest().singleSideLane(lanes, 1280, 720))
+    }
+    @Test
     fun mirrorCapStaysBelowTheAlertFloor() {
         // A guessed boundary may be drawn but must never raise a warning, so the
         // mirror ceiling has to stay under the gate's confidence floor.
@@ -111,13 +138,14 @@ class UfldLaneDetectorTest {
  */
 private class UfldLaneDetectorForTest {
     fun singleSideLane(
-        lanes: Array<UfldLaneDetector.LanePoints?>, imgW: Int
+        lanes: Array<UfldLaneDetector.LanePoints?>, imgW: Int, frameHeight: Int = 0
     ): Pair<String, UfldLaneDetector.LanePoints>? {
         val mid = imgW / 2f
         var bestL: UfldLaneDetector.LanePoints? = null
         var bestR: UfldLaneDetector.LanePoints? = null
         for (l in lanes) {
             if (l == null || l.size < 3) continue
+            if (frameHeight > 0 && !LaneGeometry.passesSpanGate(l, frameHeight)) continue
             if (l.xBottom < mid) {
                 if (bestL == null || l.size > bestL.size) bestL = l
             } else {

@@ -147,6 +147,13 @@ class UfldLaneDetector(private val context: Context) {
     private var nnApiDelegate: org.tensorflow.lite.Delegate? = null
     private var cachedInput: ByteBuffer? = null
     private var cachedOutput: ByteBuffer? = null
+    // Reused inference scratch: per-frame allocations (pixels, decode
+    // workspace, scaled Bitmap) were ~3 MB of garbage at 5 Hz — enough GC
+    // churn to make the offset median skip beats. The detector is driven
+    // from a single analyzer thread, so no synchronization is needed.
+    private var cachedPixels: IntArray? = null
+    private var cachedExpVals: FloatArray? = null
+    private var cachedScaled: Bitmap? = null
 
     /** Which execution path the interpreter actually uses (for diagnostics). */
     var activeBackend: String = "none"
@@ -178,6 +185,9 @@ class UfldLaneDetector(private val context: Context) {
 
     /** Offset of the last real sample, so a hold does not report "centred". */
     private var currentOffset: Float = 0f
+
+    /** Last ego pair chosen, so a lane change can reset the temporal state. */
+    private var lastPair: Pair<Int, Int>? = null
 
     @Synchronized
     fun isLoaded(): Boolean = interpreter != null
@@ -285,6 +295,14 @@ class UfldLaneDetector(private val context: Context) {
             e.printStackTrace()
         }
         interpreter = null
+        cachedScaled?.let {
+            try {
+                if (!it.isRecycled) it.recycle()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        cachedScaled = null
         try {
             gpuDelegate?.close()
         } catch (e: Exception) {
@@ -321,6 +339,8 @@ class UfldLaneDetector(private val context: Context) {
         closeLocked()
         cachedInput = null
         cachedOutput = null
+        cachedPixels = null
+        cachedExpVals = null
     }
 
     @Synchronized
@@ -328,6 +348,7 @@ class UfldLaneDetector(private val context: Context) {
         emaState.clear()
         emaFrame.clear()
         frameCounter = 0L
+        lastPair = null
         egoGeometry.reset()
         offsetHistory.clear()
         lastShiftLeft = 0f
@@ -335,6 +356,14 @@ class UfldLaneDetector(private val context: Context) {
         leftSupport = 1f
         rightSupport = 1f
         currentOffset = 0f
+        cachedScaled?.let {
+            try {
+                if (!it.isRecycled) it.recycle()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        cachedScaled = null
     }
 
     private fun obtainInput(): ByteBuffer {
@@ -357,6 +386,40 @@ class UfldLaneDetector(private val context: Context) {
         return ByteBuffer.allocateDirect(need).order(ByteOrder.nativeOrder()).also { cachedOutput = it }
     }
 
+    private fun obtainPixels(): IntArray {
+        val cur = cachedPixels
+        if (cur != null && cur.size == INPUT_W * INPUT_H) return cur
+        return IntArray(INPUT_W * INPUT_H).also { cachedPixels = it }
+    }
+
+    private fun obtainExpVals(): FloatArray {
+        val cur = cachedExpVals
+        if (cur != null && cur.size == GRIDING_NUM) return cur
+        return FloatArray(GRIDING_NUM).also { cachedExpVals = it }
+    }
+
+    /**
+     * The scaled working Bitmap, reused across frames. Scaling allocates a
+     * full RGB bitmap every call — at 5 Hz that is a young-gen churn the
+     * analyzer does not need.
+     */
+    private fun obtainScaled(source: Bitmap): Bitmap {
+        if (source.width == INPUT_W && source.height == INPUT_H) return source
+        val cur = cachedScaled
+        if (cur != null && !cur.isRecycled && cur.width == INPUT_W && cur.height == INPUT_H) {
+            return cur
+        }
+        cur?.let {
+            try {
+                if (!it.isRecycled) it.recycle()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return Bitmap.createBitmap(INPUT_W, INPUT_H, Bitmap.Config.ARGB_8888)
+            .also { cachedScaled = it }
+    }
+
     /**
      * Run UFLD on a frame. Returns (left, right) polylines in IMAGE pixels
      * plus a 0..1 confidence, or nulls when no ego pair passes validation.
@@ -371,8 +434,34 @@ class UfldLaneDetector(private val context: Context) {
             // One marking mask per frame, reused by both sides.
             markingMeasurer.buildMarkingMask(frame.pixels, INPUT_W, INPUT_H)
             val lanes = frame.lanes
-            val candidates = lanes.filterNotNull()
-                .map { EgoLaneGeometry.Lane(it.index, it.xBottom, it.size) }
+            // Compare every lane at ONE row. Raw xBottom places each lane at
+            // its own lowest decoded depth, so a gap measured that way mixes a
+            // near-field and a far-field x — the same "two different rows" bug
+            // already fixed for the offset/confidence path, still present in
+            // width learning and pair selection. Fitting each polyline at a
+            // shared, as-low-as-supported row makes the learned ego width and
+            // the chosen pair agree with what is actually drawn.
+            //
+            // Span-gated first: a 3-point curb fragment has enough points to
+            // reach here but extrapolates wildly at the shared row, so it could
+            // win the pair or drag the width prior. The same gate hides it from
+            // the overlay, so it must not influence geometry either.
+            val decoded = lanes.filterNotNull()
+                .filter { LaneGeometry.passesSpanGate(it, bitmap.height) }
+            val commonEvalRow = if (decoded.isEmpty()) {
+                bitmap.height.toFloat()
+            } else {
+                val lowest = decoded.maxOf { it.yBottom }
+                LaneGeometry.evalRow(lowest, lowest, bitmap.height)
+            }
+            val candidates = decoded.map { pts ->
+                val x = LaneGeometry.fitQuadratic(pts.x, pts.y)?.x(commonEvalRow) ?: pts.xBottom
+                EgoLaneGeometry.Lane(
+                    pts.index,
+                    x.coerceIn(0f, bitmap.width.toFloat()),
+                    pts.size
+                )
+            }
             // Learn the ego width BEFORE pairing: this frame supplies both.
             egoGeometry.observeWidth(candidates, bitmap.width)
             val pair = egoGeometry.choosePair(candidates, bitmap.width)
@@ -381,6 +470,18 @@ class UfldLaneDetector(private val context: Context) {
                 singleSide(lanes, bitmap, frame, sizes)
             } else {
                 val (li, ri) = pair
+                // A changed pair is a lane change (or a model re-slot). The
+                // per-side EMA and the offset median still hold the OLD lane's
+                // geometry, and blending that into the new lane produces a
+                // phantom line plus a fabricated departure. Drop both so the
+                // new lane is learned from scratch and the gate stays quiet
+                // until it has fresh samples.
+                if (lastPair != null && lastPair != pair) {
+                    emaState.clear()
+                    emaFrame.clear()
+                    offsetHistory.clear()
+                }
+                lastPair = pair
                 val left = reAnchor(lanes[li]!!, frame, bitmap)
                 val right = reAnchor(lanes[ri]!!, frame, bitmap)
                 val leftSm = smooth("L", left)
@@ -397,7 +498,7 @@ class UfldLaneDetector(private val context: Context) {
                             "off=${"%.1f".format(rawOffset)} conf=${"%.2f".format(conf)}"
                     )
                 }
-                UfldResult(leftSm, rightSm, conf, true, offsetPx = rawOffset)
+                UfldResult(leftSm, rightSm, conf, true, offsetPx = rawOffset, offsetTrusted = true)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -416,7 +517,7 @@ class UfldLaneDetector(private val context: Context) {
         frame: Frame,
         sizes: List<Int>
     ): UfldResult {
-        val single = singleSideLane(lanes, bitmap.width)
+        val single = singleSideLane(lanes, bitmap.width, bitmap.height)
         if (single == null) {
             android.util.Log.d(
                 "UfldLaneDetector",
@@ -446,7 +547,7 @@ class UfldLaneDetector(private val context: Context) {
                     "img=${bitmap.width}x${bitmap.height}"
             )
         }
-        return UfldResult(leftSm, rightSm, conf, true, mirrored = true, offsetPx = rawOffset)
+        return UfldResult(leftSm, rightSm, conf, true, mirrored = true, offsetPx = rawOffset, offsetTrusted = false)
     }
 
     /**
@@ -543,6 +644,21 @@ class UfldLaneDetector(private val context: Context) {
         return sorted[sorted.size / 2]
     }
 
+    /**
+     * The current offset median WITHOUT adding a sample.
+     *
+     * Used when this frame's offset is not a measurement (mirrored single side
+     * or a held sample). Feeding those guesses into [offsetHistory] would shift
+     * the median that later warns about a REAL pair: the gate caps the guess'
+     * confidence so it cannot warn itself, but the pollution outlives it.
+     */
+    @Synchronized
+    fun peekSmoothedOffset(): Float {
+        if (offsetHistory.isEmpty()) return 0f
+        val sorted = offsetHistory.sorted()
+        return sorted[sorted.size / 2]
+    }
+
     /** True once enough samples exist for the median to mean anything. */
     fun hasOffsetHistory(): Boolean = offsetHistory.size >= OFFSET_MEDIAN_MIN
 
@@ -554,10 +670,12 @@ class UfldLaneDetector(private val context: Context) {
 
     private fun holdLast(): UfldResult {
         // Dashed lines / shadows: keep last lanes briefly, then decay.
+        // A hold is stale geometry: the offset must not enter the warning
+        // median (see offsetTrusted), it only keeps the HUD line alive.
         val l = emaState["L"]?.takeIf { frameCounter - (emaFrame["L"] ?: -99L) <= HOLD_FRAMES }
         val r = emaState["R"]?.takeIf { frameCounter - (emaFrame["R"] ?: -99L) <= HOLD_FRAMES }
         return if (l != null || r != null) {
-            UfldResult(l, r, HOLD_CONFIDENCE, l != null && r != null, offsetPx = currentOffset)
+            UfldResult(l, r, HOLD_CONFIDENCE, l != null && r != null, offsetPx = currentOffset, offsetTrusted = false)
         } else {
             UfldResult(null, null, 0.1f, false)
         }
@@ -566,9 +684,27 @@ class UfldLaneDetector(private val context: Context) {
     private fun smooth(side: String, cur: LanePoints): LanePoints {
         val prev = emaState[side]
         val out = if (prev != null && prev.size == cur.size) {
-            val nx = FloatArray(cur.size) { i -> EMA_ALPHA * cur.x[i] + (1 - EMA_ALPHA) * prev.x[i] }
-            val ny = FloatArray(cur.size) { i -> EMA_ALPHA * cur.y[i] + (1 - EMA_ALPHA) * prev.y[i] }
-            LanePoints(nx, ny)
+            // Same point COUNT is not the same ROWS: UFLD skips a row whose
+            // no-line cell wins, so a dropped row shifts every following index
+            // and an index-wise EMA blends two different rows into a phantom
+            // kink. Blend only points that share a row; keep the current
+            // measurement where there is no match, and fall back to the raw
+            // frame when too few points aligned.
+            var aligned = 0
+            val nx = FloatArray(cur.size) { i ->
+                val j = rowIndex(prev.y, cur.y[i])
+                if (j >= 0) {
+                    aligned++
+                    EMA_ALPHA * cur.x[i] + (1 - EMA_ALPHA) * prev.x[j]
+                } else {
+                    cur.x[i]
+                }
+            }
+            if (aligned >= cur.size * 3 / 4) {
+                LanePoints(nx, cur.y.copyOf())
+            } else {
+                cur
+            }
         } else {
             cur
         }
@@ -577,22 +713,36 @@ class UfldLaneDetector(private val context: Context) {
         return out
     }
 
+    /** Index of the sample on row [row] (anchors are shared across frames). */
+    private fun rowIndex(rows: FloatArray, row: Float): Int {
+        for (i in rows.indices) {
+            if (abs(rows[i] - row) < 0.5f) return i
+        }
+        return -1
+    }
+
     /** Inference result: decoded lanes in IMAGE pixels plus the model-grid pixels. */
     private data class Frame(val lanes: Array<LanePoints?>, val pixels: IntArray)
 
     private fun runInference(itp: Interpreter, bitmap: Bitmap): Frame {
         val input = obtainInput()
-        val pixels = IntArray(INPUT_W * INPUT_H)
-        val scaled = if (bitmap.width == INPUT_W && bitmap.height == INPUT_H) {
+        val pixels = obtainPixels()
+        val directHit = bitmap.width == INPUT_W && bitmap.height == INPUT_H
+        val scaled = if (directHit) {
             bitmap
         } else {
-            Bitmap.createScaledBitmap(bitmap, INPUT_W, INPUT_H, true)
+            val target = obtainScaled(bitmap)
+            val canvas = android.graphics.Canvas(target)
+            val src = android.graphics.Rect(0, 0, bitmap.width, bitmap.height)
+            val dst = android.graphics.Rect(0, 0, INPUT_W, INPUT_H)
+            val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+            // Opaque fill first: the reused target keeps stale pixels where a
+            // source with alpha would composite instead of replace.
+            canvas.drawColor(android.graphics.Color.BLACK)
+            canvas.drawBitmap(bitmap, src, dst, paint)
+            target
         }
-        try {
-            scaled.getPixels(pixels, 0, INPUT_W, 0, 0, INPUT_W, INPUT_H)
-        } finally {
-            if (scaled !== bitmap) scaled.recycle()
-        }
+        scaled.getPixels(pixels, 0, INPUT_W, 0, 0, INPUT_W, INPUT_H)
         // ImageNet normalization, RGB order.
         for (px in pixels) {
             val r = ((px shr 16) and 0xFF) / 255f
@@ -628,7 +778,7 @@ class UfldLaneDetector(private val context: Context) {
                     val v = output.getFloat((k * NUM_ROWS * NUM_LANES + base) * 4)
                     if (v > maxV) maxV = v
                 }
-                val expVals = FloatArray(GRIDING_NUM)
+                val expVals = obtainExpVals()
                 for (k in 0 until GRIDING_NUM) {
                     val e = kotlin.math.exp(output.getFloat((k * NUM_ROWS * NUM_LANES + base) * 4) - maxV)
                     expVals[k] = e
@@ -668,13 +818,22 @@ class UfldLaneDetector(private val context: Context) {
      * Single-side fallback: the lane with the most points on the one visible
      * side of the image centre. Returns ("L"|"R", points) or null when both
      * sides have candidates (the pair path owns that case).
+     *
+     * Span-gated so the choice matches the overlay: without the gate a tall
+     * curb fragment on the wrong side could win by point count and the fallback
+     * would mirror a boundary nobody drew.
      */
-    internal fun singleSideLane(lanes: Array<LanePoints?>, imgW: Int): Pair<String, LanePoints>? {
+    internal fun singleSideLane(
+        lanes: Array<LanePoints?>,
+        imgW: Int,
+        frameHeight: Int = 0
+    ): Pair<String, LanePoints>? {
         val mid = imgW / 2f
         var bestL: LanePoints? = null
         var bestR: LanePoints? = null
         for (l in lanes) {
             if (l == null || l.size < MIN_POINTS) continue
+            if (frameHeight > 0 && !LaneGeometry.passesSpanGate(l, frameHeight)) continue
             if (l.xBottom < mid) {
                 if (bestL == null || l.size > bestL.size) bestL = l
             } else {
@@ -697,6 +856,12 @@ class UfldLaneDetector(private val context: Context) {
         /** True when one side was mirrored from the other (single-lane fallback). */
         val mirrored: Boolean = false,
         /** Vehicle-centre offset in image pixels, evaluated at one common row. */
-        val offsetPx: Float = 0f
+        val offsetPx: Float = 0f,
+        /**
+         * True when this frame's offset is a measurement from a real pair. False for
+         * the mirrored single-side fallback (a guess) and for held samples (stale):
+         * callers must not feed those into the warning median.
+         */
+        val offsetTrusted: Boolean = true
     )
 }

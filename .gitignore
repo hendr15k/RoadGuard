@@ -7,3 +7,10 @@ app/src/main/assets/ufld_tusimple_float16.tflite
 app/build/
 build/
 local.properties
+
+# Stray LaTeX scratch files (see feature/hud-alert-feedback: t3_*.pdf etc. in repo root)
+*.aux
+*.log
+*.out
+*.toc
+*.pdf

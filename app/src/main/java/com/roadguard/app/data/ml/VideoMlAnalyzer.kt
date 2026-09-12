@@ -75,6 +75,15 @@ class VideoMlAnalyzer(
     @Volatile
     private var closed = false
 
+    /**
+     * Temporal median of classic-CV offsets — same justification as
+     * [MlDetectionAnalyzer]: the fallback's per-frame flags warn on single
+     * noisy frames, so the offset is re-gated below.
+     */
+    private val classicOffsetWindow = LaneOffsetWindow()
+    @Volatile
+    private var classicPrevOffset: Float? = null
+
     /** Guards the ML Kit detector so close() cannot dispose it mid-frame. */
     private val detectorLock = Any()
 
@@ -205,10 +214,11 @@ class VideoMlAnalyzer(
                 if (!leftOk && !rightOk) {
                     // Both stubs: treat as UFLD miss, run classic fallback.
                     val cv = sw()
-                    finalIsDriftingLeft = cv.isDriftingLeft
-                    finalIsDriftingRight = cv.isDriftingRight
+                    val gate = classicGate(cv, bitmap.width)
+                    finalIsDriftingLeft = gate.first
+                    finalIsDriftingRight = gate.second
                     finalConfidence = cv.confidence
-                    finalCenterOffset = cv.centerOffset
+                    finalCenterOffset = gate.third
                     finalLaneWidth = cv.laneWidth
                     leftMark = if (cv.leftLane?.valid == true) "L" else "-"
                     rightMark = if (cv.rightLane?.valid == true) "R" else "-"
@@ -225,7 +235,14 @@ class VideoMlAnalyzer(
                         )
                     } ?: com.roadguard.app.domain.model.LaneCurve()
                 } else {
-                    val ufldOff = ufld!!.smoothedOffset(ufldResult.offsetPx)
+                    // Mirrored/hold samples are guesses, not measurements (see
+                    // the camera path): read the stale median instead of
+                    // polluting it with a fabricated offset.
+                    val ufldOff = if (ufldResult.offsetTrusted) {
+                        ufld!!.smoothedOffset(ufldResult.offsetPx)
+                    } else {
+                        ufld!!.peekSmoothedOffset()
+                    }
                     val historyLen = ufld.offsetHistorySize()
                     val laneWidthPx = ufld.measuredLaneWidthPx()
                     // Same gate as the camera path ([MlDetectionAnalyzer]): a
@@ -262,10 +279,11 @@ class VideoMlAnalyzer(
                 }
             } else {
                 val cv = sw()
-                finalIsDriftingLeft = cv.isDriftingLeft
-                finalIsDriftingRight = cv.isDriftingRight
+                val gate = classicGate(cv, bitmap.width)
+                finalIsDriftingLeft = gate.first
+                finalIsDriftingRight = gate.second
                 finalConfidence = cv.confidence
-                finalCenterOffset = cv.centerOffset
+                finalCenterOffset = gate.third
                 finalLaneWidth = cv.laneWidth
                 leftMark = if (cv.leftLane?.valid == true) "L" else "-"
                 rightMark = if (cv.rightLane?.valid == true) "R" else "-"
@@ -450,77 +468,50 @@ class VideoMlAnalyzer(
     // Mirror of MlDetectionAnalyzer: the video path consumes the same raw
     // polylines but owns its own copy (no shared base class yet).
 
-    private fun fitQuadratic(
-        xs: FloatArray, ys: FloatArray
-    ): Triple<Float, Float, Float>? {
-        if (xs.size < 3 || xs.size != ys.size) return null
-        val n = xs.size
-        var sY = 0.0; var sY2 = 0.0; var sY3 = 0.0; var sY4 = 0.0
-        var sX = 0.0; var sXY = 0.0; var sXY2 = 0.0
-        for (i in 0 until n) {
-            val x = xs[i].toDouble(); val y = ys[i].toDouble()
-            val y2 = y * y
-            sY += y; sY2 += y2; sY3 += y2 * y; sY4 += y2 * y2
-            sX += x; sXY += x * y; sXY2 += x * y2
-        }
-        fun det3(m: Array<DoubleArray>): Double {
-            return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
-                m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-                m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
-        }
-        val m = arrayOf(
-            doubleArrayOf(sY4, sY3, sY2),
-            doubleArrayOf(sY3, sY2, sY),
-            doubleArrayOf(sY2, sY, n.toDouble())
+    /**
+     * Classic-CV fallback drift, on the same terms as the UFLD path.
+     * See [MlDetectionAnalyzer] for why the fallback's own flags are not used.
+     */
+    private fun classicGate(
+        cv: LaneDetector.LaneDetectionResult,
+        frameWidth: Int
+    ): Triple<Boolean, Boolean, Float> {
+        val smoothed = classicOffsetWindow.add(cv.centerOffset)
+        val historyLen = classicOffsetWindow.size
+        val leftOk = cv.leftLane?.valid == true
+        val rightOk = cv.rightLane?.valid == true
+        val implausible = classicPrevOffset?.let { prev ->
+            LaneDriftGate.isImplausibleStep(prev, smoothed, cv.laneWidth)
+        } ?: false
+        classicPrevOffset = smoothed
+        if (implausible) return Triple(false, false, smoothed)
+        val left = LaneDriftGate.isDriftingLeft(
+            centerOffset = smoothed,
+            frameWidth = frameWidth,
+            sensitivity = laneSensitivity,
+            confidence = cv.confidence,
+            leftCurveValid = leftOk,
+            rightCurveValid = rightOk,
+            historySize = historyLen,
+            laneWidth = cv.laneWidth
         )
-        val d = det3(m)
-        if (kotlin.math.abs(d) < 1e-9) return null
-        val mx = arrayOf(
-            doubleArrayOf(sXY2, sY3, sY2),
-            doubleArrayOf(sXY, sY2, sY),
-            doubleArrayOf(sX, sY, n.toDouble())
+        val right = LaneDriftGate.isDriftingRight(
+            centerOffset = smoothed,
+            frameWidth = frameWidth,
+            sensitivity = laneSensitivity,
+            confidence = cv.confidence,
+            leftCurveValid = leftOk,
+            rightCurveValid = rightOk,
+            historySize = historyLen,
+            laneWidth = cv.laneWidth
         )
-        val my = arrayOf(
-            doubleArrayOf(sY4, sXY2, sY2),
-            doubleArrayOf(sY3, sXY, sY),
-            doubleArrayOf(sY2, sX, n.toDouble())
-        )
-        val mz = arrayOf(
-            doubleArrayOf(sY4, sY3, sXY2),
-            doubleArrayOf(sY3, sY2, sXY),
-            doubleArrayOf(sY2, sY, sX)
-        )
-        val a = (det3(mx) / d).toFloat()
-        if (kotlin.math.abs(a) > 0.5f) return null
-        return Triple(a, (det3(my) / d).toFloat(), (det3(mz) / d).toFloat())
+        return Triple(left, right, smoothed)
     }
 
     private fun ufldPointsToCurve(
         pts: UfldLaneDetector.LanePoints?,
         imgH: Int = 0
-    ): com.roadguard.app.domain.model.LaneCurve {
-        if (pts == null || pts.size < 3) return com.roadguard.app.domain.model.LaneCurve()
-        var yMin = pts.y[0]; var yMax = pts.y[0]
-        for (y in pts.y) {
-            if (y < yMin) yMin = y
-            if (y > yMax) yMax = y
-        }
-        // Span gate: a real ego boundary runs most of the frame height.
-        // UFLD sometimes returns a short stub (a few rows near the horizon,
-        // e.g. a curb fragment) that fitQuadratic happily fits — the overlay
-        // then extrapolates the stub across the whole frame and the corridor
-        // floats in the sky. Reject stubs instead of drawing them.
-        // pts.y are IMAGE pixels (runInference scales CFG->image), so the
-        // span is tested against the real frame height.
-        if (imgH > 0 && yMax - yMin < imgH * 0.35f) {
-            return com.roadguard.app.domain.model.LaneCurve()
-        }
-        val abc = fitQuadratic(pts.x, pts.y) ?: return com.roadguard.app.domain.model.LaneCurve()
-        return com.roadguard.app.domain.model.LaneCurve(
-            a = abc.first, b = abc.second, c = abc.third,
-            yStart = yMin, yEnd = yMax, valid = true
-        )
-    }
+    ): com.roadguard.app.domain.model.LaneCurve = LaneGeometry.curveOf(pts, imgH)
 
     private fun ufldCurvesToDomain(
         res: UfldLaneDetector.UfldResult,

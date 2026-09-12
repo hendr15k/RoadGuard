@@ -6,6 +6,9 @@ import com.roadguard.app.domain.model.AlertPolicy
 import com.roadguard.app.domain.model.AlertSignal
 import com.roadguard.app.domain.model.AlertState
 import com.roadguard.app.domain.model.AppSettings
+import com.roadguard.app.domain.model.DriveSession
+import com.roadguard.app.domain.model.DriveSessionStats
+import com.roadguard.app.domain.model.AlertLogEntry
 import com.roadguard.app.domain.model.LaneInfo
 import com.roadguard.app.domain.model.VehicleDistance
 import com.roadguard.app.domain.model.WarningType
@@ -33,8 +36,27 @@ class MainViewModel @Inject constructor(
     val vehicleDistance: StateFlow<VehicleDistance?> = _vehicleDistance.asStateFlow()
 
     private val policy = AlertPolicy()
+    private val session = DriveSession()
     private val _alertState = MutableStateFlow<AlertState>(AlertState.Idle)
     val alertState: StateFlow<AlertState> = _alertState.asStateFlow()
+
+    private val _sessionStats = MutableStateFlow(DriveSessionStats())
+    val sessionStats: StateFlow<DriveSessionStats> = _sessionStats.asStateFlow()
+
+    private val _alertHistory = MutableStateFlow<List<AlertLogEntry>>(emptyList())
+    val alertHistory: StateFlow<List<AlertLogEntry>> = _alertHistory.asStateFlow()
+
+    init {
+        session.start(System.currentTimeMillis())
+        _sessionStats.value = session.stats(System.currentTimeMillis())
+    }
+
+    fun resetSession() {
+        val nowMs = System.currentTimeMillis()
+        session.reset(nowMs)
+        _sessionStats.value = session.stats(nowMs)
+        _alertHistory.value = session.log()
+    }
 
     /** One-shot vibration/sound event emitted exactly when the gate fires. */
     private val _alertSignal = MutableStateFlow<AlertSignal?>(null)
@@ -104,7 +126,14 @@ class MainViewModel @Inject constructor(
         )
         _alertState.value = evaluation.state
         _activeWarning.value = (evaluation.state as? AlertState.Warning)?.type
-        if (evaluation.signal != null) _alertSignal.value = evaluation.signal
+        session.recordState(evaluation.state, nowMs)
+        if (evaluation.signal != null) {
+            _alertSignal.value = evaluation.signal
+            if (session.recordSignal(evaluation.signal, nowMs)) {
+                _alertHistory.value = session.log()
+            }
+        }
+        _sessionStats.value = session.stats(nowMs)
     }
 
     fun consumeAlertSignal() {

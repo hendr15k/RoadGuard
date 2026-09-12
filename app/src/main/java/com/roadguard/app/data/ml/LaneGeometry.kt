@@ -1,5 +1,6 @@
 package com.roadguard.app.data.ml
 
+import com.roadguard.app.domain.model.LaneCurve
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -196,5 +197,31 @@ object LaneGeometry {
             max(leftBotY, rightBotY)
         )
         return max(lo, 0.5f * frameHeight)
+    }
+
+    /**
+     * Fit a domain [LaneCurve] through a decoded UFLD polyline.
+     *
+     * Uses the robust [fitQuadratic] (outlier-rejection passes) rather than the
+     * old per-analyzer Cramer fit that had no rejection at all. The offset and
+     * confidence path already used the robust fit, so the overlay and the
+     * warning used to disagree about where the lane was whenever one row was
+     * mis-decoded by a shadow or a crossing marking. The span gate rejects
+     * short stubs (curb fragments) whose extrapolation would float in the sky.
+     */
+    fun curveOf(pts: UfldLaneDetector.LanePoints?, frameHeight: Int): LaneCurve {
+        if (pts == null || pts.size < 3) return LaneCurve()
+        if (!passesSpanGate(pts, frameHeight)) return LaneCurve()
+        val q = fitQuadratic(pts.x, pts.y) ?: return LaneCurve()
+        val (_, topY) = top(pts)
+        val (_, botY) = bottom(pts)
+        return LaneCurve(
+            a = q.a,
+            b = q.b,
+            c = q.c,
+            yStart = topY,
+            yEnd = botY,
+            valid = true
+        )
     }
 }
