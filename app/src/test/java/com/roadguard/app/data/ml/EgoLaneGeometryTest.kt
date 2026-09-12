@@ -119,6 +119,22 @@ class EgoLaneGeometryTest {
     }
 
     @Test
+    fun mirroredBoundarySitsOneFullEgoWidthFromTheVisibleOne() {
+        val g = EgoLaneGeometry()
+        repeat(10) { g.observeWidth(lanes(300f, 700f, 1100f), 1280) }
+        // Measured lane width 400. The opposite boundary must be a FULL width
+        // away (700), not half a width (500) — otherwise the synthetic pair's
+        // lane centre is wrong by halfWidth/2 and the drawn corridor is halved.
+        assertEquals(700f, g.oppositeBoundaryX(300f, isLeft = true, frameWidth = 1280), 1f)
+        // The synthetic pair path must agree with the dedicated single-side helper.
+        assertEquals(
+            g.singleSideOffset(300f, isLeft = true, frameWidth = 1280),
+            g.centerOffset(300f, g.oppositeBoundaryX(300f, true, 1280), 1280),
+            0.01f
+        )
+    }
+
+    @Test
     fun centerOffsetIsZeroWhenCentred() {
         val g = EgoLaneGeometry()
         assertEquals(0f, g.centerOffset(440f, 840f, 1280), 0.001f)

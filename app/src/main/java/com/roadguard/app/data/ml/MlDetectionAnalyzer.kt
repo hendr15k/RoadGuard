@@ -215,9 +215,6 @@ class MlDetectionAnalyzer(
             }
 
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-            val swResult = laneDetector.detectLanesFromYUV(
-                yData, imageProxy.width, imageProxy.height, rotationDegrees
-            )
 
             // Upright dimensions — the buffer is frequently landscape-oriented
             // while the UI (and the lane model) work in the upright frame.
@@ -226,6 +223,22 @@ class MlDetectionAnalyzer(
             val uprightLandscape = uprightRotation == 0 || uprightRotation == 180
             val uprightWidth = if (uprightLandscape) imageProxy.width else imageProxy.height
             val uprightHeight = if (uprightLandscape) imageProxy.height else imageProxy.width
+
+            // Classic CV is a lazy fallback: detectLanesFromYUV costs ~50-60 ms
+            // (blur + BEV warp + edge/road-mask + pair/Hough). Running it on
+            // every frame even when UFLD wins starved the analyzer thread; the
+            // video path already runs it lazily for the same reason.
+            var swResult: LaneDetector.LaneDetectionResult? = null
+            fun sw(): LaneDetector.LaneDetectionResult {
+                var r = swResult
+                if (r == null) {
+                    r = laneDetector.detectLanesFromYUV(
+                        yData, imageProxy.width, imageProxy.height, rotationDegrees
+                    )
+                    swResult = r
+                }
+                return r
+            }
 
             // UFLD first: direct lane points instead of histogram hunting. Falls
             // back to classic CV when no model is present or no ego pair is
@@ -269,57 +282,74 @@ class MlDetectionAnalyzer(
                 // Span-gated like the video path: stub sides come back
                 // invalid and are hidden instead of floating in the sky.
                 val ufldCurves = ufldCurvesToDomain(ufldResult!!, uprightHeight)
-                // Offset from the detector: both boundaries evaluated at ONE
-                // row, then the temporal median — the raw per-frame value
-                // jitters by more than the drift window on a straight road.
-                val smoothedOff = ufld!!.smoothedOffset(ufldResult.offsetPx)
-                val ufldOff = smoothedOff
-                val historyLen = ufld.offsetHistorySize()
-                val laneWidthPx = ufld.measuredLaneWidthPx()
                 val leftOk = ufldCurves.first.valid
                 val rightOk = ufldCurves.second.valid
-                // A departure warning needs a complete, confident pair: a stub
-                // side (span-gated to invalid) would otherwise still feed the
-                // offset helper its sky-high bottom point and alarm for a lane
-                // the overlay refuses to draw; the single-lane mirror is a
-                // guess and is capped below this floor for that reason.
-                finalIsDriftingLeft = LaneDriftGate.isDriftingLeft(
-                    centerOffset = ufldOff,
-                    frameWidth = uprightWidth,
-                    sensitivity = laneSensitivity,
-                    confidence = ufldResult.confidence,
-                    leftCurveValid = leftOk,
-                    rightCurveValid = rightOk,
-                    historySize = historyLen,
-                    laneWidth = laneWidthPx
-                )
-                finalIsDriftingRight = LaneDriftGate.isDriftingRight(
-                    centerOffset = ufldOff,
-                    frameWidth = uprightWidth,
-                    sensitivity = laneSensitivity,
-                    confidence = ufldResult.confidence,
-                    leftCurveValid = leftOk,
-                    rightCurveValid = rightOk,
-                    historySize = historyLen,
-                    laneWidth = laneWidthPx
-                )
-                finalConfidence = ufldResult.confidence
-                finalCenterOffset = ufldOff
-                finalLaneWidth = laneWidthPx.takeIf { it > 1f } ?: ufldLaneWidth(ufldResult)
-                leftVisible = ufldResult.left != null && leftOk
-                rightVisible = ufldResult.right != null && rightOk
-                leftCurve = ufldCurves.first
-                rightCurve = ufldCurves.second
+                if (!leftOk && !rightOk) {
+                    // Both sides are span-gated stubs: UFLD has nothing to
+                    // draw or measure. Fall back to classic CV exactly like the
+                    // video path instead of reporting a fabricated offset from
+                    // a stub the overlay refuses to show.
+                    val cv = sw()
+                    finalIsDriftingLeft = cv.isDriftingLeft
+                    finalIsDriftingRight = cv.isDriftingRight
+                    finalConfidence = cv.confidence
+                    finalCenterOffset = cv.centerOffset
+                    finalLaneWidth = cv.laneWidth
+                    leftVisible = cv.leftLane?.valid == true
+                    rightVisible = cv.rightLane?.valid == true
+                    leftCurve = toDomainCurve(cv.leftLane)
+                    rightCurve = toDomainCurve(cv.rightLane)
+                } else {
+                    // Offset from the detector: both boundaries evaluated at ONE
+                    // row, then the temporal median — the raw per-frame value
+                    // jitters by more than the drift window on a straight road.
+                    val ufldOff = ufld!!.smoothedOffset(ufldResult.offsetPx)
+                    val historyLen = ufld.offsetHistorySize()
+                    val laneWidthPx = ufld.measuredLaneWidthPx()
+                    // A departure warning needs a complete, confident pair: a stub
+                    // side (span-gated to invalid) would otherwise still feed the
+                    // offset helper its sky-high bottom point and alarm for a lane
+                    // the overlay refuses to draw; the single-lane mirror is a
+                    // guess and is capped below this floor for that reason.
+                    finalIsDriftingLeft = LaneDriftGate.isDriftingLeft(
+                        centerOffset = ufldOff,
+                        frameWidth = uprightWidth,
+                        sensitivity = laneSensitivity,
+                        confidence = ufldResult.confidence,
+                        leftCurveValid = leftOk,
+                        rightCurveValid = rightOk,
+                        historySize = historyLen,
+                        laneWidth = laneWidthPx
+                    )
+                    finalIsDriftingRight = LaneDriftGate.isDriftingRight(
+                        centerOffset = ufldOff,
+                        frameWidth = uprightWidth,
+                        sensitivity = laneSensitivity,
+                        confidence = ufldResult.confidence,
+                        leftCurveValid = leftOk,
+                        rightCurveValid = rightOk,
+                        historySize = historyLen,
+                        laneWidth = laneWidthPx
+                    )
+                    finalConfidence = ufldResult.confidence
+                    finalCenterOffset = ufldOff
+                    finalLaneWidth = laneWidthPx.takeIf { it > 1f } ?: ufldLaneWidth(ufldResult)
+                    leftVisible = ufldResult.left != null && leftOk
+                    rightVisible = ufldResult.right != null && rightOk
+                    leftCurve = ufldCurves.first
+                    rightCurve = ufldCurves.second
+                }
             } else {
-                finalIsDriftingLeft = swResult.isDriftingLeft
-                finalIsDriftingRight = swResult.isDriftingRight
-                finalConfidence = swResult.confidence
-                finalCenterOffset = swResult.centerOffset
-                finalLaneWidth = swResult.laneWidth
-                leftVisible = swResult.leftLane?.valid == true
-                rightVisible = swResult.rightLane?.valid == true
-                leftCurve = toDomainCurve(swResult.leftLane)
-                rightCurve = toDomainCurve(swResult.rightLane)
+                val cv = sw()
+                finalIsDriftingLeft = cv.isDriftingLeft
+                finalIsDriftingRight = cv.isDriftingRight
+                finalConfidence = cv.confidence
+                finalCenterOffset = cv.centerOffset
+                finalLaneWidth = cv.laneWidth
+                leftVisible = cv.leftLane?.valid == true
+                rightVisible = cv.rightLane?.valid == true
+                leftCurve = toDomainCurve(cv.leftLane)
+                rightCurve = toDomainCurve(cv.rightLane)
             }
 
             val laneSample = LaneInfo(
@@ -334,8 +364,8 @@ class MlDetectionAnalyzer(
                 rightLaneVisible = rightVisible,
                 leftCurve = leftCurve,
                 rightCurve = rightCurve,
-                imageWidth = swResult.imageWidth,
-                imageHeight = swResult.imageHeight,
+                imageWidth = swResult?.imageWidth ?: uprightWidth,
+                imageHeight = swResult?.imageHeight ?: uprightHeight,
                 timestamp = currentTime
             )
             // The sample carries the frame's capture time (the default stamp

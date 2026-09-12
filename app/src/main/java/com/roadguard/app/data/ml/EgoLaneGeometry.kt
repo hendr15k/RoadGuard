@@ -138,6 +138,20 @@ class EgoLaneGeometry {
     /** Half the ego width, for the single-side fallback. Never the raw frame fraction. */
     fun halfWidth(frameWidth: Int): Float = widthOr(frameWidth) / 2f
 
+    /**
+     * X of the opposite ego boundary when only one is visible.
+     *
+     * The synthetic boundary must sit one FULL ego width from the visible one,
+     * not half: [halfWidth] is the distance from a boundary to the car centre,
+     * so a half-width shift would place the fabricated marking on the lane
+     * centre — halving the drawn corridor and biasing the centre offset by
+     * halfWidth/2.
+     */
+    fun oppositeBoundaryX(sideX: Float, isLeft: Boolean, frameWidth: Int): Float {
+        val width = widthOr(frameWidth)
+        return if (isLeft) sideX + width else sideX - width
+    }
+
     /** Offset of the vehicle centre from the midpoint of the two boundaries. */
     fun centerOffset(leftX: Float, rightX: Float, frameWidth: Int): Float =
         frameWidth * 0.5f - (leftX + rightX) / 2f

@@ -1714,7 +1714,10 @@ class LaneDetector(
         history.addLast(currentX)
         if (history.size > 8) history.removeFirst()
 
-        if (previous == null) return current
+        // Only blend with a VALID previous curve. A missed detection comes back
+        // as a valid=false placeholder whose polynomial is all zeros; blending
+        // that in dragged the first good curve toward x = 0 for a frame.
+        val prev = previous?.takeIf { it.valid } ?: return current
 
         val baseAlpha = 0.7f
         // Anchor the span to the CURRENT measurement: the old code blended y1/y2
@@ -1728,9 +1731,9 @@ class LaneDetector(
         // polynomial. Smoothing endpoints and coefficients separately (as before)
         // left the overlay drawing a different lane than the offset logic used,
         // and the discarded polyA threw away all curvature.
-        val polyA = current.polyA * baseAlpha + previous.polyA * (1f - baseAlpha)
-        val polyB = current.polyB * baseAlpha + previous.polyB * (1f - baseAlpha)
-        val polyC = current.polyC * baseAlpha + previous.polyC * (1f - baseAlpha)
+        val polyA = current.polyA * baseAlpha + prev.polyA * (1f - baseAlpha)
+        val polyB = current.polyB * baseAlpha + prev.polyB * (1f - baseAlpha)
+        val polyC = current.polyC * baseAlpha + prev.polyC * (1f - baseAlpha)
         val x1 = polyA * y1 * y1 + polyB * y1 + polyC
         val x2 = polyA * y2 * y2 + polyB * y2 + polyC
 

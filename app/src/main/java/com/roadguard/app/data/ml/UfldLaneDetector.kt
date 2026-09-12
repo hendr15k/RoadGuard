@@ -426,9 +426,10 @@ class UfldLaneDetector(private val context: Context) {
         }
         val (side, rawPts) = single
         val pts = reAnchor(rawPts, frame, bitmap)
-        val half = egoGeometry.halfWidth(bitmap.width)
+        val width = egoGeometry.widthOr(bitmap.width)
         val shiftedX = FloatArray(pts.size) { i ->
-            (pts.x[i] + if (side == "L") half else -half).coerceIn(0f, bitmap.width.toFloat())
+            egoGeometry.oppositeBoundaryX(pts.x[i], side == "L", bitmap.width)
+                .coerceIn(0f, bitmap.width.toFloat())
         }
         val other = LanePoints(shiftedX, pts.y.copyOf())
         val left = if (side == "L") pts else other
@@ -441,7 +442,7 @@ class UfldLaneDetector(private val context: Context) {
             android.util.Log.d(
                 "UfldLaneDetector",
                 "frame=$frameCounter backend=$activeBackend sizes=$sizes pair=none " +
-                    "single=$side half=${"%.0f".format(half)} conf=${"%.2f".format(conf)} " +
+                    "single=$side width=${"%.0f".format(width)} conf=${"%.2f".format(conf)} " +
                     "img=${bitmap.width}x${bitmap.height}"
             )
         }
