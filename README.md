@@ -81,6 +81,12 @@ RoadGuard therefore has its own keystore, separate from the shared
 - CI restores the same keystore from the `ROADGUARD_KEYSTORE_BASE64` secret and
   asserts the resulting certificate against the expected fingerprint, so a
   mis-set secret fails the run instead of publishing.
+- **CI does not publish the release** — it gates (tests, signed build, signer
+  assertion) and uploads the APK as a workflow artifact. Publishing happens on
+  the build host, which also compares the uploaded asset's digest, re-verifies
+  the signer on the DOWNLOADED file and installs it. Two publishers conflicted:
+  the workflow token cannot update a release created by the host, and that
+  failure turned CI red on infrastructure instead of on the artifact.
 
 **Known, unchanged:** the released artifact is `app-debug.apk`, i.e. the debug
 variant and therefore `android:debuggable`. That is deliberate — the debug build

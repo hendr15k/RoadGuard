@@ -145,26 +145,18 @@ jobs:
           name: RoadGuard-${{ github.run_id }}
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Download APK for release
-        uses: actions/download-artifact@v4
-        with:
-          name: RoadGuard-${{ github.run_id }}
-          path: ./apk
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: RoadGuard v${{ steps.version.outputs.version }}
-          body: |
-            ## RoadGuard v${{ steps.version.outputs.version }}
-
-            Built from commit `${{ github.sha }}`
-            Triggered by: `${{ github.event_name }}`
-
-            ### Changes
-            See commits since last release.
-          files: ./apk/app-debug.apk
-          draft: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # One publisher only. The release is published from the build host
+      # (see README, 'Release builds'): that is where the APK is built, its
+      # sha256 is compared against the uploaded asset's digest, and the
+      # DOWNLOADED file is installed on a device. Trying to also publish here
+      # made CI run red on infrastructure rather than on the artifact - on a
+      # tag whose release already exists, softprops/action-gh-release fails with
+      # "Resource not accessible by integration" from the workflow token.
+      # CI's job is the gate: tests, a signed build, and the signer check above.
+      - name: Release ownership
+        run: |
+          echo "Release published from the build host (see README). This run gated:"
+          echo "  - unit tests: passed"
+          echo "  - signed APK: built with the RoadGuard key"
+          echo "  - signer:     asserted against the expected fingerprint"
+          echo "Build artifact: RoadGuard-${{ github.run_id }}"
