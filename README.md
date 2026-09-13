@@ -55,17 +55,32 @@ app/src/main/java/com/roadguard/app/
 
 ## Release builds
 
-`assembleDebug` is what gets attached to a release, which has two consequences
-worth knowing before shipping:
+`assembleDebug` is what gets attached to a release. The signer is the app's
+identity — Android refuses to install a package whose signer changed, so every
+variant (debug and release, local and CI) must be signed with the SAME key.
 
-- CI has no signing key, so it signs with the **runner's** temporary debug
-  keystore. That certificate differs from the one the locally built APKs use,
-  and Android refuses to install a package whose signer changed — so a
-  CI-produced APK cannot update an already installed app. Release assets must
-  therefore be built locally (`./gradlew assembleDebug`) with the keystore in
-  `~/.android/debug.keystore`; the pre-`vv1.0.55` releases came from that path.
-- The debug build is `android:debuggable`. Shipping a release/CI signing key is
-  the actual fix for both points.
+RoadGuard therefore has its own keystore, separate from the shared
+`~/.android/debug.keystore`:
+
+- Host location: `/root/roadguard-signing/roadguard-release.jks`
+  (alias `roadguard`, passwords in `credentials.env`, mode 600 — never in git).
+- Local builds load it through the wrapper, which is the supported entry point:
+
+  ```bash
+  tools/roadguard-gradle.sh :app:testDebugUnitTest :app:assembleDebug --offline
+  tools/roadguard-gradle.sh :app:assembleRelease --offline
+  ```
+
+  A plain `./gradlew assembleRelease` without the four
+  `ROADGUARD_*` environment variables fails on purpose rather than shipping a
+  third signer.
+- CI restores the same keystore from the `ROADGUARD_KEYSTORE_BASE64` secret and
+  verifies the resulting certificate in the build log.
+
+**One-time migration:** everything up to and including `v1.0.64` was signed with
+a debug key (locally `eb3b6b03…`, on CI a per-run key such as `c0ce2a3f…`), so
+installing the first key-signed build needs one `adb uninstall` — app data is
+lost that once. From then on updates install in place.
 
 ## License
 

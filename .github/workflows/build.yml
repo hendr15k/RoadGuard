@@ -80,8 +80,39 @@ jobs:
       - name: Unit tests
         run: ./gradlew testDebugUnitTest
 
-      - name: Build Debug APK
+      # The signing key is the app's identity. Before this the runner signed
+      # with its own freshly generated debug keystore, so the released APK had a
+      # DIFFERENT signer than any locally built one and could not be installed
+      # over it ("signer changed" -> forced uninstall, app data lost). The
+      # dedicated RoadGuard keystore is restored from a secret and used for
+      # every variant.
+      - name: Restore the RoadGuard signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ROADGUARD_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "ROADGUARD_KEYSTORE_BASE64 is not set — refusing to build an unsigned release" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing/roadguard-release.jks"
+          echo "ROADGUARD_KEYSTORE_PATH=$RUNNER_TEMP/signing/roadguard-release.jks" >> $GITHUB_ENV
+
+      - name: Build signed APK
+        env:
+          ROADGUARD_KEYSTORE_PASSWORD: ${{ secrets.ROADGUARD_KEYSTORE_PASSWORD }}
+          ROADGUARD_KEY_ALIAS: ${{ secrets.ROADGUARD_KEY_ALIAS }}
+          ROADGUARD_KEY_PASSWORD: ${{ secrets.ROADGUARD_KEY_PASSWORD }}
         run: ./gradlew assembleDebug
+
+      - name: Verify the signer
+        run: |
+          set -euo pipefail
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk \
+            | grep -E 'Signer #1 certificate (DN|SHA-256)'
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

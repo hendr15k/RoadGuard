@@ -8,6 +8,12 @@ app/build/
 build/
 local.properties
 
+# Signing material must never be committed: the release keystore lives outside
+# the repo (/root/roadguard-signing) and CI restores it from a secret.
+*.jks
+*.keystore
+credentials.env
+
 # Stray LaTeX scratch files (see feature/hud-alert-feedback: t3_*.pdf etc. in repo root)
 *.aux
 *.log

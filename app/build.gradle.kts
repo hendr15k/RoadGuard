@@ -13,8 +13,8 @@ android {
         applicationId = "com.roadguard.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 24
-        versionName = "v1.0.64"
+        versionCode = 25
+        versionName = "v1.0.65"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -28,6 +28,50 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
+            )
+        }
+    }
+    signingConfigs {
+        // Dedicated RoadGuard release identity, supplied from the environment so
+        // no key material ever reaches the repo:
+        //   ROADGUARD_KEYSTORE_PATH / ROADGUARD_KEYSTORE_PASSWORD /
+        //   ROADGUARD_KEY_ALIAS / ROADGUARD_KEY_PASSWORD
+        // Before this, releases were signed with whatever debug keystore the
+        // build host happened to have: the local ~/.android one and the CI
+        // runner's freshly generated one produced DIFFERENT signers for the
+        // same versionName, so an APK downloaded from a release could not be
+        // installed over the one already on the device.
+        create("release") {
+            val ksPath = System.getenv("ROADGUARD_KEYSTORE_PATH").orEmpty()
+            if (ksPath.isNotEmpty() && file(ksPath).exists()) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("ROADGUARD_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ROADGUARD_KEY_ALIAS")
+                keyPassword = System.getenv("ROADGUARD_KEY_PASSWORD")
+            }
+        }
+    }
+    // Debug shares the release identity: on-device testing installs the debug
+    // APK, and a debug-keyed build would refuse to update over a shipped
+    // release ("signer changed") and force a data-wiping uninstall.
+    buildTypes.forEach { type ->
+        val cfg = signingConfigs.getByName("release")
+        if (cfg.storeFile != null) {
+            type.signingConfig = cfg
+        }
+    }
+    // Fail closed: a release APK without the dedicated key is worse than no
+    // release — it would ship a third signer nobody can update over.
+    gradle.taskGraph.whenReady {
+        val releaseSigning = allTasks.any { t ->
+            t.name.startsWith("package") && t.name.endsWith("Release") ||
+                t.name.startsWith("bundle") && t.name.endsWith("Release")
+        }
+        if (releaseSigning && signingConfigs.getByName("release").storeFile == null) {
+            throw GradleException(
+                "RoadGuard release keystore missing. Set ROADGUARD_KEYSTORE_PATH, " +
+                    "ROADGUARD_KEYSTORE_PASSWORD, ROADGUARD_KEY_ALIAS and " +
+                    "ROADGUARD_KEY_PASSWORD (see tools/roadguard-gradle.sh)."
             )
         }
     }
