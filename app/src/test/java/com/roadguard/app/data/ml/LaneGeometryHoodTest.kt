@@ -69,4 +69,27 @@ class LaneGeometryHoodTest {
         val row = LaneGeometry.evalRow(600f, 600f, 720)
         assertEquals(600f, row, 0.01f)
     }
+
+    @Test
+    fun spanGateIsMeasuredAgainstTheVisibleRoadNotTheFullFrame() {
+        // App geometry 640x360, hood 8 % -> road ends at row 331.2. A lane
+        // spanning 120 px covers 0.333 of the full frame (below the 0.35
+        // gate) but 0.362 of the visible road: it is a real boundary the
+        // hood clip shortened, not a curb stub.
+        val lane = points(floatArrayOf(210f, 250f, 290f, 330f))
+        assertTrue(
+            "120 px of 360 px must fail the full-frame gate",
+            !LaneGeometry.passesSpanGate(lane, 360)
+        )
+        assertTrue(
+            "the same 120 px must pass once the 8 % hood band is excluded",
+            LaneGeometry.passesSpanGate(lane, 360, 0.08f)
+        )
+    }
+
+    @Test
+    fun curveOfKeepsARoadSpanningLaneUnderTheHoodCut() {
+        val lane = points(floatArrayOf(210f, 250f, 290f, 330f))
+        assertTrue(LaneGeometry.curveOf(lane, 360, 0.08f).valid)
+    }
 }

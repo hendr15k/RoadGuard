@@ -138,14 +138,15 @@ class UfldLaneDetectorTest {
  */
 private class UfldLaneDetectorForTest {
     fun singleSideLane(
-        lanes: Array<UfldLaneDetector.LanePoints?>, imgW: Int, frameHeight: Int = 0
+        lanes: Array<UfldLaneDetector.LanePoints?>, imgW: Int, frameHeight: Int = 0,
+        hoodFraction: Float = 0f
     ): Pair<String, UfldLaneDetector.LanePoints>? {
         val mid = imgW / 2f
         var bestL: UfldLaneDetector.LanePoints? = null
         var bestR: UfldLaneDetector.LanePoints? = null
         for (l in lanes) {
             if (l == null || l.size < 3) continue
-            if (frameHeight > 0 && !LaneGeometry.passesSpanGate(l, frameHeight)) continue
+            if (frameHeight > 0 && !LaneGeometry.passesSpanGate(l, frameHeight, hoodFraction)) continue
             if (l.xBottom < mid) {
                 if (bestL == null || l.size > bestL.size) bestL = l
             } else {

@@ -196,11 +196,20 @@ object LaneGeometry {
     }
 
     /** A real boundary spans most of the frame; a curb fragment does not. */
-    fun passesSpanGate(pts: UfldLaneDetector.LanePoints?, frameHeight: Int): Boolean {
+    fun passesSpanGate(
+        pts: UfldLaneDetector.LanePoints?,
+        frameHeight: Int,
+        hoodFraction: Float = 0f
+    ): Boolean {
         if (pts == null || pts.size < 3 || frameHeight <= 0) return false
         val (_, topY) = top(pts)
         val (_, botY) = bottom(pts)
-        return (botY - topY) >= SPAN_FRACTION * frameHeight
+        // The hood clip shortens every polyline BEFORE this gate runs, so the
+        // requirement must shrink with the visible road: a full-frame span is
+        // unreachable once the bottom band is excluded, and real boundaries
+        // would be rejected. hoodFraction = 0 keeps the historic behaviour.
+        val roadHeight = hoodTop(frameHeight, hoodFraction)
+        return (botY - topY) >= SPAN_FRACTION * roadHeight
     }
 
     /**
@@ -259,9 +268,13 @@ object LaneGeometry {
      * mis-decoded by a shadow or a crossing marking. The span gate rejects
      * short stubs (curb fragments) whose extrapolation would float in the sky.
      */
-    fun curveOf(pts: UfldLaneDetector.LanePoints?, frameHeight: Int): LaneCurve {
+    fun curveOf(
+        pts: UfldLaneDetector.LanePoints?,
+        frameHeight: Int,
+        hoodFraction: Float = 0f
+    ): LaneCurve {
         if (pts == null || pts.size < 3) return LaneCurve()
-        if (!passesSpanGate(pts, frameHeight)) return LaneCurve()
+        if (!passesSpanGate(pts, frameHeight, hoodFraction)) return LaneCurve()
         val q = fitQuadratic(pts.x, pts.y) ?: return LaneCurve()
         val (_, topY) = top(pts)
         val (_, botY) = bottom(pts)

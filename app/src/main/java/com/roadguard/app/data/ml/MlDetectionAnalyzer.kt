@@ -496,7 +496,8 @@ class MlDetectionAnalyzer(
     private fun ufldPointsToCurve(
         pts: UfldLaneDetector.LanePoints?,
         imgH: Int = 0
-    ): com.roadguard.app.domain.model.LaneCurve = LaneGeometry.curveOf(pts, imgH)
+    ): com.roadguard.app.domain.model.LaneCurve =
+        LaneGeometry.curveOf(pts, imgH, hoodFraction)
 
     private fun ufldCurvesToDomain(
         res: UfldLaneDetector.UfldResult,

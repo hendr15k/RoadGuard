@@ -462,7 +462,7 @@ class UfldLaneDetector(private val context: Context) {
             // win the pair or drag the width prior. The same gate hides it from
             // the overlay, so it must not influence geometry either.
             val decoded = lanes.filterNotNull()
-                .filter { LaneGeometry.passesSpanGate(it, bitmap.height) }
+                .filter { LaneGeometry.passesSpanGate(it, bitmap.height, hoodFrac) }
             val commonEvalRow = if (decoded.isEmpty()) {
                 bitmap.height.toFloat()
             } else {
@@ -532,7 +532,7 @@ class UfldLaneDetector(private val context: Context) {
         frame: Frame,
         sizes: List<Int>
     ): UfldResult {
-        val single = singleSideLane(lanes, bitmap.width, bitmap.height)
+        val single = singleSideLane(lanes, bitmap.width, bitmap.height, hoodFraction)
         if (single == null) {
             android.util.Log.d(
                 "UfldLaneDetector",
@@ -615,8 +615,8 @@ class UfldLaneDetector(private val context: Context) {
         frameHeight: Int,
         mirrored: Boolean
     ): Pair<Float, Float> {
-        val leftOk = LaneGeometry.passesSpanGate(left, frameHeight)
-        val rightOk = LaneGeometry.passesSpanGate(right, frameHeight)
+        val leftOk = LaneGeometry.passesSpanGate(left, frameHeight, hoodFraction)
+        val rightOk = LaneGeometry.passesSpanGate(right, frameHeight, hoodFraction)
         val evalRow = LaneGeometry.evalRow(
             if (leftOk) left!!.yBottom else frameHeight.toFloat(),
             if (rightOk) right!!.yBottom else frameHeight.toFloat(),
@@ -842,14 +842,15 @@ class UfldLaneDetector(private val context: Context) {
     internal fun singleSideLane(
         lanes: Array<LanePoints?>,
         imgW: Int,
-        frameHeight: Int = 0
+        frameHeight: Int = 0,
+        hoodFraction: Float = 0f
     ): Pair<String, LanePoints>? {
         val mid = imgW / 2f
         var bestL: LanePoints? = null
         var bestR: LanePoints? = null
         for (l in lanes) {
             if (l == null || l.size < MIN_POINTS) continue
-            if (frameHeight > 0 && !LaneGeometry.passesSpanGate(l, frameHeight)) continue
+            if (frameHeight > 0 && !LaneGeometry.passesSpanGate(l, frameHeight, hoodFraction)) continue
             if (l.xBottom < mid) {
                 if (bestL == null || l.size > bestL.size) bestL = l
             } else {
