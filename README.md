@@ -73,9 +73,19 @@ RoadGuard therefore has its own keystore, separate from the shared
 
   A plain `./gradlew assembleRelease` without the four
   `ROADGUARD_*` environment variables fails on purpose rather than shipping a
-  third signer.
+  third signer. The guard covers every packaging task (`packageDebug`,
+  `packageRelease`, `package*Bundle`, `package*UniversalApk`, `assemble*`,
+  `bundle*` — anything that turns into an APK depends on one of them), so the
+  debug build cannot silently revert to the host's debug keystore either. Unit
+  tests need no key.
 - CI restores the same keystore from the `ROADGUARD_KEYSTORE_BASE64` secret and
-  verifies the resulting certificate in the build log.
+  asserts the resulting certificate against the expected fingerprint, so a
+  mis-set secret fails the run instead of publishing.
+
+**Known, unchanged:** the released artifact is `app-debug.apk`, i.e. the debug
+variant and therefore `android:debuggable`. That is deliberate — the debug build
+is the one the lane pipeline is tested on device — but it is not a production
+hardening state; moving the release asset to `assembleRelease` is still open.
 
 **One-time migration:** everything up to and including `v1.0.64` was signed with
 a debug key (locally `eb3b6b03…`, on CI a per-run key such as `c0ce2a3f…`), so

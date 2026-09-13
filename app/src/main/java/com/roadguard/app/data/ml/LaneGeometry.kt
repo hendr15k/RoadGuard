@@ -199,7 +199,7 @@ object LaneGeometry {
     fun passesSpanGate(
         pts: UfldLaneDetector.LanePoints?,
         frameHeight: Int,
-        hoodFraction: Float = 0f
+        hoodFraction: Float
     ): Boolean {
         if (pts == null || pts.size < 3 || frameHeight <= 0) return false
         val (_, topY) = top(pts)
@@ -207,7 +207,13 @@ object LaneGeometry {
         // The hood clip shortens every polyline BEFORE this gate runs, so the
         // requirement must shrink with the visible road: a full-frame span is
         // unreachable once the bottom band is excluded, and real boundaries
-        // would be rejected. hoodFraction = 0 keeps the historic behaviour.
+        // would be rejected as stubs.
+        //
+        // hoodFraction has NO default on purpose. It did for one revision, and
+        // that made the defect this gate just lost silently reachable again:
+        // a caller that omits it would measure hood-clipped points against the
+        // full frame. Pass 0f to get the historic full-frame behaviour
+        // explicitly.
         val roadHeight = hoodTop(frameHeight, hoodFraction)
         return (botY - topY) >= SPAN_FRACTION * roadHeight
     }
@@ -271,7 +277,7 @@ object LaneGeometry {
     fun curveOf(
         pts: UfldLaneDetector.LanePoints?,
         frameHeight: Int,
-        hoodFraction: Float = 0f
+        hoodFraction: Float
     ): LaneCurve {
         if (pts == null || pts.size < 3) return LaneCurve()
         if (!passesSpanGate(pts, frameHeight, hoodFraction)) return LaneCurve()

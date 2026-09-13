@@ -109,9 +109,18 @@ jobs:
       - name: Verify the signer
         run: |
           set -euo pipefail
+          # Assert, don't print: a keystore secret holding the WRONG key would
+          # otherwise sign, print a certificate and pass this step green.
+          EXPECTED="9c4b19192c99348a215b10349aab1071cac0317e209b292d3accfb03ccca1c34"
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk \
             | grep -E 'Signer #1 certificate (DN|SHA-256)'
+          ACTUAL=$("$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk \
+            | awk -F': ' '/Signer #1 certificate SHA-256 digest/{print $2}')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::unexpected signer $ACTUAL (expected $EXPECTED) - ROADGUARD_KEYSTORE_BASE64 holds the wrong keystore"
+            exit 1
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

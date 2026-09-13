@@ -79,7 +79,7 @@ class LaneGeometryHoodTest {
         val lane = points(floatArrayOf(210f, 250f, 290f, 330f))
         assertTrue(
             "120 px of 360 px must fail the full-frame gate",
-            !LaneGeometry.passesSpanGate(lane, 360)
+            !LaneGeometry.passesSpanGate(lane, 360, 0f)
         )
         assertTrue(
             "the same 120 px must pass once the 8 % hood band is excluded",
