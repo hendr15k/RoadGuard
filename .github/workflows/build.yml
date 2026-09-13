@@ -109,16 +109,33 @@ jobs:
       - name: Verify the signer
         run: |
           set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
           # Assert, don't print: a keystore secret holding the WRONG key would
           # otherwise sign, print a certificate and pass this step green.
           EXPECTED="9c4b19192c99348a215b10349aab1071cac0317e209b292d3accfb03ccca1c34"
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk \
-            | grep -E 'Signer #1 certificate (DN|SHA-256)'
-          ACTUAL=$("$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk \
-            | awk -F': ' '/Signer #1 certificate SHA-256 digest/{print $2}')
+          echo "apk: $APK"
+          ls -l "$APK" || { echo "::error::$APK does not exist"; exit 1; }
+          APKSIGNER=""
+          for candidate in "$ANDROID_HOME/build-tools/34.0.0/apksigner" \
+                           $(ls -d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V -r); do
+            if [ -x "$candidate" ]; then APKSIGNER="$candidate"; break; fi
+          done
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::no apksigner under $ANDROID_HOME/build-tools"
+            ls -l "$ANDROID_HOME/build-tools" || true
+            exit 1
+          fi
+          echo "apksigner: $APKSIGNER"
+          # Print the full verification output first: a missing/ambiguous
+          # signature must be visible in the log, not swallowed by a pipe that
+          # exits non-zero with nothing to show.
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL=$("$APKSIGNER" verify --print-certs "$APK" \
+            | awk -F': ' '/Signer #1 certificate SHA-256 digest/{print $2; exit}')
+          echo "signer:   $ACTUAL"
+          echo "expected: $EXPECTED"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::unexpected signer $ACTUAL (expected $EXPECTED) - ROADGUARD_KEYSTORE_BASE64 holds the wrong keystore"
+            echo "::error::unexpected signer '$ACTUAL' (expected '$EXPECTED') - ROADGUARD_KEYSTORE_BASE64 holds the wrong keystore"
             exit 1
           fi
 
