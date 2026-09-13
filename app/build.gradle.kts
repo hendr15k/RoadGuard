@@ -94,7 +94,8 @@ android {
         if (packaging.isNotEmpty() && !roadguardSigningReady) {
             throw GradleException(
                 "RoadGuard signing is incomplete, refusing to package " +
-                    "${packaging.first().name}. Missing: " +
+                    packaging.joinToString(", ") { it.name } +
+                    ". Missing: " +
                     roadguardMissingSigningInputs.joinToString(", ") +
                     ". Run through tools/roadguard-gradle.sh, or set the four " +
                     "ROADGUARD_* variables (see README, 'Release builds')."

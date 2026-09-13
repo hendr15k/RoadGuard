@@ -843,7 +843,7 @@ class UfldLaneDetector(private val context: Context) {
         lanes: Array<LanePoints?>,
         imgW: Int,
         frameHeight: Int = 0,
-        hoodFraction: Float = 0f
+        hoodFraction: Float
     ): Pair<String, LanePoints>? {
         val mid = imgW / 2f
         var bestL: LanePoints? = null
