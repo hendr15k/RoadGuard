@@ -9,6 +9,8 @@ Driving Safety Assistant for Android
 - **Forward Collision Warning** - Monitors distance to vehicle ahead
 - **Audio & Vibration Alerts** - Immediate feedback for dangerous situations
 - **Customizable Settings** - Adjust warning sensitivity
+- **Drive History** - Finished drives are saved with duration, incidents and
+  safety score; the log survives app restarts (Settings sheet → "History" tab)
 
 ## Screenshots
 
