@@ -160,6 +160,7 @@ fun MainScreen(
     val settings by viewModel.settings.collectAsState()
     val sessionStats by viewModel.sessionStats.collectAsState()
     val alertHistory by viewModel.alertHistory.collectAsState()
+    val driveHistory by viewModel.driveLog.collectAsState()
     val updateState by updateViewModel.updateState.collectAsState()
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
@@ -341,7 +342,10 @@ fun MainScreen(
                 onPageChange = { settingsPage = it },
                 sessionStats = sessionStats,
                 alertHistory = alertHistory,
-                onResetSession = viewModel::resetSession
+                driveHistory = driveHistory.records,
+                onResetSession = viewModel::resetSession,
+                onFinishDrive = viewModel::finishAndArchiveDrive,
+                onClearDriveHistory = viewModel::clearDriveHistory
             )
         }
 

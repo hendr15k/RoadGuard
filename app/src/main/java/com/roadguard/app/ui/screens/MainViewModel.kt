@@ -9,9 +9,11 @@ import com.roadguard.app.domain.model.AppSettings
 import com.roadguard.app.domain.model.DriveSession
 import com.roadguard.app.domain.model.DriveSessionStats
 import com.roadguard.app.domain.model.AlertLogEntry
+import com.roadguard.app.domain.model.DriveLog
 import com.roadguard.app.domain.model.LaneInfo
 import com.roadguard.app.domain.model.VehicleDistance
 import com.roadguard.app.domain.model.WarningType
+import com.roadguard.app.data.repository.DriveArchiver
 import com.roadguard.app.domain.usecase.GetSettingsUseCase
 import com.roadguard.app.domain.usecase.UpdateSettingsUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -24,10 +26,14 @@ import javax.inject.Inject
 @HiltViewModel
 class MainViewModel @Inject constructor(
     private val getSettingsUseCase: GetSettingsUseCase,
-    private val updateSettingsUseCase: UpdateSettingsUseCase
+    private val updateSettingsUseCase: UpdateSettingsUseCase,
+    private val driveArchiver: DriveArchiver
 ) : ViewModel() {
 
     val settings: StateFlow<AppSettings> = getSettingsUseCase()
+
+    /** Completed drives, newest first, persisted across app restarts. */
+    val driveLog: StateFlow<DriveLog> = driveArchiver.driveLog
 
     private val _laneInfo = MutableStateFlow<LaneInfo?>(null)
     val laneInfo: StateFlow<LaneInfo?> = _laneInfo.asStateFlow()
@@ -49,6 +55,23 @@ class MainViewModel @Inject constructor(
     init {
         session.start(System.currentTimeMillis())
         _sessionStats.value = session.stats(System.currentTimeMillis())
+    }
+
+    /**
+     * Ends the current drive and files it in the persistent history.
+     * The in-memory session resets only when a record was actually
+     * stored: a sub-second clean opening is dropped (noise), so the
+     * running drive continues instead of being replaced by a new
+     * empty one.
+     */
+    fun finishAndArchiveDrive() {
+        val nowMs = System.currentTimeMillis()
+        val archived = driveArchiver.archiveNow(session.stats(nowMs), endedAtMs = nowMs)
+        if (archived) resetSession()
+    }
+
+    fun clearDriveHistory() {
+        driveArchiver.clearHistory()
     }
 
     fun resetSession() {

@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.roadguard.app.domain.model.AlertLogEntry
 import com.roadguard.app.domain.model.AppSettings
+import com.roadguard.app.domain.model.DriveRecord
 import com.roadguard.app.domain.model.DriveSessionStats
 import com.roadguard.app.domain.model.WarningType
 import com.roadguard.app.ui.theme.DangerRed
@@ -23,7 +24,7 @@ import com.roadguard.app.ui.theme.SafeGreen
 import com.roadguard.app.ui.theme.WarningYellow
 import java.util.Locale
 
-private val TAB_TITLES = listOf("Settings", "Drive", "Alerts")
+private val TAB_TITLES = listOf("Settings", "Drive", "Alerts", "History")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,7 +36,10 @@ fun SettingsBottomSheet(
     onPageChange: (Int) -> Unit = {},
     sessionStats: DriveSessionStats = DriveSessionStats(),
     alertHistory: List<AlertLogEntry> = emptyList(),
-    onResetSession: () -> Unit = {}
+    driveHistory: List<DriveRecord> = emptyList(),
+    onResetSession: () -> Unit = {},
+    onFinishDrive: () -> Unit = {},
+    onClearDriveHistory: () -> Unit = {}
 ) {
     val sheetState = rememberModalBottomSheetState()
 
@@ -62,8 +66,9 @@ fun SettingsBottomSheet(
 
             when (page.coerceIn(0, TAB_TITLES.lastIndex)) {
                 0 -> SettingsPage(settings, onSettingsUpdate)
-                1 -> DrivePage(sessionStats, onResetSession)
-                else -> AlertsPage(alertHistory)
+                1 -> DrivePage(sessionStats, onResetSession, onFinishDrive)
+                2 -> AlertsPage(alertHistory)
+                else -> HistoryPage(driveHistory, onClearDriveHistory)
             }
         }
     }
@@ -200,7 +205,8 @@ private fun SettingsPage(
 @Composable
 private fun DrivePage(
     stats: DriveSessionStats,
-    onResetSession: () -> Unit
+    onResetSession: () -> Unit,
+    onFinishDrive: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -223,12 +229,123 @@ private fun DrivePage(
         )
 
         Spacer(modifier = Modifier.height(16.dp))
+
+        // Ends this drive and files it in the History tab. Without
+        // it the recorder would only persist on process death, if
+        // ever — the log was the session's memory, not the app's.
+        Button(
+            onClick = onFinishDrive,
+            modifier = Modifier.align(Alignment.End)
+        ) { Text("Finish drive & save to history") }
+
+        Spacer(modifier = Modifier.height(8.dp))
         Button(
             onClick = onResetSession,
             modifier = Modifier.align(Alignment.End)
         ) { Text("Reset current drive") }
 
         Spacer(modifier = Modifier.height(32.dp))
+    }
+}
+
+@Composable
+private fun HistoryPage(
+    records: List<DriveRecord>,
+    onClearDriveHistory: () -> Unit
+) {
+    if (records.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "No completed drives yet. Tap \"Finish drive\" on the Drive " +
+                    "tab to save one here — the history survives app restarts.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        return
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${records.size} drive(s)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            TextButton(onClick = onClearDriveHistory) { Text("Clear history") }
+        }
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 16.dp)
+        ) {
+            items(records, key = { "${it.startedAtMs}-${it.endedAtMs}" }) { record ->
+                HistoryRow(record)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryRow(record: DriveRecord) {
+    val color = when {
+        record.safetyScore >= 80 -> SafeGreen
+        record.safetyScore >= 50 -> WarningYellow
+        else -> DangerRed
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                record.summary(),
+                color = Color.White,
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                "score ${record.safetyScore} · " +
+                    "${record.laneDepartureCount} lane · " +
+                    "${record.collisionCount} collision" +
+                    if (record.urgentCollisionCount > 0)
+                        " · ${record.urgentCollisionCount} urgent"
+                    else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                formatDuration(record.durationMs),
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                String.format(
+                    Locale.US, "%.0f%% warned",
+                    record.warningTimeFraction * 100f
+                ),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 

@@ -19,11 +19,12 @@
 
 ## Feature List
 1. **Real-time Camera Preview** - Display live camera feed with overlay
-2. **Lane Departure Warning** - Detect when vehicle drifts from lane and alert
+2. **Lane Departure Warning** - Detect when vehicle drifts from lane
 3. **Forward Collision Warning** - Monitor distance to vehicle ahead and warn if too close
 4. **Audio Alerts** - Sound notifications for warnings
 5. **Visual Alerts** - On-screen warning indicators
 6. **Settings Screen** - Configure warning sensitivities
+7. **Drive History** - Persist completed drives (duration, incidents, warning time, safety score) across app restarts, with a bounded 30-entry cap
 
 ## UI/UX Design Direction
 - **Visual Style**: Material Design 3, dark theme optimized for driving
