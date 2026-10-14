@@ -185,11 +185,13 @@ class LaneOffsetWindow(private val windowSize: Int = DEFAULT_WINDOW) {
     /** Number of samples collected so far, for the gate's history floor. */
     val size: Int get() = history.size
 
+    @Synchronized
     fun reset() {
         history.clear()
     }
 
     /** Adds a raw offset and returns the current temporal median (or the sample). */
+    @Synchronized
     fun add(rawOffset: Float): Float {
         if (!rawOffset.isFinite()) return median()
         history.addLast(rawOffset)

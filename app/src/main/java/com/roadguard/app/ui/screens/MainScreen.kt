@@ -122,6 +122,31 @@ fun MainScreen(
     val videoAnalyzer = remember(videoUri) {
         if (videoUri != null) VideoMlAnalyzer(appContext = appContext) else null
     }
+    // The live camera analyzer is hoisted to this scope (instead of living only
+    // inside CameraPreview) so a source switch can drop its temporal state:
+    // camera -> video -> camera reuses the SAME instance, and without the reset
+    // its EMA / offset median / ego-width prior blend the first frames of the new
+    // source with the previous one's lane, which the drift gate then reads as a
+    // phantom offset.
+    val cameraAnalyzer = remember(appContext) {
+        MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext)
+    }
+    // MainScreen owns the hoisted camera analyzer's lifetime, so a source switch
+    // (which disposes CameraPreview) does NOT dispose it — CameraPreview only
+    // closes an analyzer it created itself. Disposal happens when MainScreen
+    // leaves composition, off the main thread and serialized against in-flight
+    // frames, exactly as CameraPreview used to do for its own instance.
+    DisposableEffect(cameraAnalyzer) {
+        onDispose {
+            closeExecutor.execute {
+                try {
+                    cameraAnalyzer.close()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
     // One process-lifetime close executor: a scope created inside this
     // composition cannot be used to close the analyzer, because Compose
     // disposes effects in reverse declaration order — the scope effect (declared
@@ -168,11 +193,11 @@ fun MainScreen(
     ) { uri: Uri? ->
         uri?.let {
             viewModel.clearDetectionState()
-            // The live camera analyzer cannot be reset from here (it lives inside
-            // CameraPreview); its EMA/offset history survives a video pick and is
-            // dropped implicitly when CameraPreview's DisposableEffect runs
-            // mlAnalyzer.close() in the onDispose. We only need to drop the video
-            // analyzer state, which we own above.
+            // Drop BOTH analyzers' temporal state: the camera analyzer is a
+            // single instance for the whole session, so its EMA / offset median /
+            // ego-width prior would otherwise blend the first video frames with
+            // the live lane and hand the drift gate a phantom offset.
+            cameraAnalyzer.resetDetectionState()
             videoAnalyzer?.resetDetectionState()
             videoUri = it
             showVideoPicker = true
@@ -262,10 +287,11 @@ fun MainScreen(
                             videoUri = null
                             showVideoPicker = false
                             viewModel.clearDetectionState()
-                            // Back to camera: the live analyzer is created fresh
-                            // when CameraPreview recomposes; drop the (now
-                            // closing) video analyzer state so it cannot bleed.
-                            if (videoUri != null) videoAnalyzer?.resetDetectionState()
+                            // Back to camera: the same instance continues, so its
+                            // state must be dropped explicitly, and the video
+                            // analyzer's state must not bleed into it.
+                            videoAnalyzer?.resetDetectionState()
+                            cameraAnalyzer.resetDetectionState()
                         },
                         modifier = Modifier
                             .align(Alignment.BottomStart)
@@ -283,7 +309,8 @@ fun MainScreen(
                     onDistanceUpdate = viewModel::updateVehicleDistance,
                     appContext = appContext,
                     settings = settings,
-                    onDistanceUpdateFrom = viewModel::updateVehicleDistanceFrom
+                    onDistanceUpdateFrom = viewModel::updateVehicleDistanceFrom,
+                    analyzer = cameraAnalyzer
                 )
 
                 LaneOverlay(
@@ -375,24 +402,26 @@ fun CameraPreview(
     appContext: Context? = null,
     settings: com.roadguard.app.domain.model.AppSettings,
     onDistanceUpdateFrom: (com.roadguard.app.domain.model.VehicleDistance?) -> Unit = { it?.let(onDistanceUpdate) },
-    passedAnalyzer: MlDetectionAnalyzer? = null
+    analyzer: MlDetectionAnalyzer? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Key mit appContext: bei Context-Wechsel (z.B. Config-Change mit DI-Swap)
-    // wird der Analyzer sauber neu erzeugt. Mit Unit oder ohne Key würde
-    // der alte Analyzer geleakt.
-    // The analyzer is hoisted to MainScreen so a source switch (camera -> video
-    // -> camera) can drop its temporal state from the same scope that owns it;
-    // when the caller passes one in, that instance is used unchanged.
-    val mlAnalyzer = remember(appContext) {
-        passedAnalyzer ?: MlDetectionAnalyzer(
-            vehicleThreshold = 20f,
-            laneSensitivity = 0.5f,
-            appContext = appContext
-        )
+    // The analyzer is normally hoisted to MainScreen so a camera -> video ->
+    // camera switch can drop its temporal state (see the comment there). The
+    // fallback keeps this composable usable standalone.
+    //
+    // OWNERSHIP: only close what this composable created. A supplied analyzer
+    // belongs to the caller, which owns its lifetime; closing a borrowed one
+    // here kills it while the caller still resets and re-lends it on the next
+    // switch (MlDetectionAnalyzer.close() is irreversible — `closed` is never
+    // cleared and the ML Kit detector + TFLite interpreter are disposed).
+    val ownedAnalyzer = remember(appContext) {
+        if (analyzer == null)
+            MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext)
+        else null
     }
+    val mlAnalyzer = analyzer ?: ownedAnalyzer!!
 
     LaunchedEffect(settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity, settings.hoodFraction) {
         mlAnalyzer.updateVehicleThreshold(settings.minFollowingDistanceMeters)
@@ -468,8 +497,10 @@ fun CameraPreview(
             // close() before shutdown() serializes it against in-flight frames —
             // closing from Main while a frame is processed crashes the interpreter.
             analysisExecutor.execute {
+                // Owned only: a supplied analyzer is disposed by its owner.
+                val toClose = ownedAnalyzer ?: return@execute
                 try {
-                    mlAnalyzer.close()
+                    toClose.close()
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }

@@ -123,17 +123,20 @@ class VideoMlAnalyzer(
      * source's geometry: [LaneDetector]'s priors and [UfldLaneDetector]'s
      * EMA, ego-width prior and offset median survive a mode change, so the
      * first frames of the new mode are blended with the old lane and the drift
-     * gate sees a phantom offset. Hold the detector lock while changing this so
-     * an in-flight frame (video path runs synchronously on the same lock)
-     * cannot observe half-reset state.
+     * gate sees a phantom offset.
+     *
+     * Thread-safety: called from the main thread on a source switch. This path
+     * DOES hold detectorLock across a whole frame, so the reset must not also
+     * take it — that would deadlock a switch against an in-flight analysis. The
+     * guard lives on the state instead: LaneDetector.reset/detectLanesFromYUV
+     * and LaneOffsetWindow.reset/add synchronize on their own monitors, and
+     * UfldLaneDetector is @Synchronized end to end.
      */
     fun resetDetectionState() {
-        synchronized(detectorLock) {
-            laneDetector.reset()
-            classicOffsetWindow.reset()
-            classicPrevOffset = null
-            ufldDetector?.reset()
-        }
+        laneDetector.reset()
+        classicOffsetWindow.reset()
+        classicPrevOffset = null
+        ufldDetector?.reset()
     }
 
     private fun ensureUfldLoaded(): UfldLaneDetector? {

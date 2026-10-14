@@ -78,9 +78,6 @@ class UfldLaneDetector(private val context: Context) {
             220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268,
             272, 276, 280, 284
         )
-        const val CFG_W = 1280f
-        const val CFG_H = 720f
-
         /**
          * Map UFLD's 1-based expected grid location to image x.
          *
@@ -90,15 +87,22 @@ class UfldLaneDetector(private val context: Context) {
          */
         fun gridCellToLaneX(location: Number, imageWidth: Int): Float {
             // `location` is the soft-argmax of the 100 scoring cells with weights
-            // 1..100, so a value of 1 must land on the FIRST linspace sample
-            // (index 0), not on the second. The previous `loc * cellWidth` read
-            // one cell too far to the right — exactly `cellWidth*imageWidth/INPUT_W`
-            // = the ~13 px overhang the existing test pins. The +1 reset to a
-            // zero-based index removes it. The trailing `-imageWidth/CFG_W` is the
-            // documented -1 px reference offset, scaled to the image.
+            // 1..100, so it is 1-based. The reference sampling axis is
+            // linspace(0, INPUT_W-1, GRIDING_NUM) with spacing (INPUT_W-1)/(GRIDING_NUM-1)
+            // = 8.0707 px, NOT INPUT_W/GRIDING_NUM = 8.0.
+            //
+            // The trailing term is a single reference pixel (the -1 in
+            // `loc * col_sample_w * W/800 - 1`), NOT `-imageWidth/CFG_W`: the old
+            // form subtracted imageWidth/1280 = 1 px at 1280 W but 1.5 px at 1920 W
+            // and 0.5 px at 640 W, i.e. a resolution-dependent bias.
+            //
+            // DO NOT "fix" the 1-based loc by subtracting a cell first: `loc` already
+            // IS the cell index the reference multiplies, and the reference's `-1`
+            // is a PIXEL, not a cell. Subtracting a cell here clamped the leftmost
+            // decodable lane (loc=1) to x=0 and repeated the original bias in the
+            // opposite direction.
             val cellWidth = (INPUT_W - 1f) / (GRIDING_NUM - 1f)
-            val idx = location.toFloat() - 1f
-            return idx.coerceAtLeast(0f) * cellWidth * imageWidth / INPUT_W - imageWidth / CFG_W
+            return location.toFloat() * cellWidth * imageWidth / INPUT_W - 1f
         }
 
         private const val MIN_POINTS = 3

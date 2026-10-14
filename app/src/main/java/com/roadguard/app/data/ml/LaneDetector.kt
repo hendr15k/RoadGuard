@@ -369,6 +369,7 @@ class LaneDetector(
         )
     }
 
+    @Synchronized
     fun detectLanesFromYUV(
         yData: ByteArray,
         width: Int, height: Int,
@@ -510,6 +511,14 @@ class LaneDetector(
         )
     }
 
+    /**
+     * Clears all cross-frame state. `@Synchronized` on the SAME monitor as
+     * [detectLanesFromYUV]: the reset is issued from the main thread on a source
+     * switch while the analyzer thread may be mid-frame, and the state it clears
+     * (the X-history deques, the Kalman filters, the selector) is not otherwise
+     * thread-safe.
+     */
+    @Synchronized
     fun reset() {
         prevLeftLine = null
         prevRightLine = null

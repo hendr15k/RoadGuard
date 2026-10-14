@@ -123,13 +123,40 @@ class UfldLaneDetectorTest {
 
     @Test
     fun gridCellMapsToOfficialLanePosition() {
-        // Official UFLD reference (ibaiGorordo + cfzd + the conformance doc):
-        // soft-argmax yields a 1-based cell index, the sampling axis is
-        // linspace(0, 800-1, 100), so x = (loc-1) * cellW * W/800 - W/1280.
-        // The previous 1-based reading shifted every lane ~13 px to the right.
+        // Official UFLD reference (ibaiGorordo port + the conformance doc):
+        // loc is the 1-based soft-argmax cell, col_sample_w = (800-1)/(100-1),
+        // and x = loc * col_sample_w * W/800 - 1. The trailing `-1` is a single
+        // reference PIXEL. The old code subtracted `imageWidth/CFG_W`, which is
+        // 1 px at 1280 W but 1.5 px at 1920 W — a resolution-dependent bias.
         val cell = 50
-        val expected = ((cell - 1) * (799f / 99f) * 1280f / 800f) - 1f
+        val expected = (cell * (799f / 99f) * 1280f / 800f) - 1f
         assertEquals(expected, UfldLaneDetector.gridCellToLaneX(cell, 1280), 0.01f)
+    }
+
+    @Test
+    fun gridCellReferenceOffsetIsResolutionIndependent() {
+        // The offset is a fixed pixel, so it must NOT scale with the image width.
+        // The old `-imageWidth/CFG_W` subtracted 1.5 px at 1920 and 0.5 px at 640.
+        val cellW = (800f - 1f) / (100f - 1f)
+        for (w in intArrayOf(640, 1280, 1920, 2160)) {
+            val expected = (10f * cellW * w / 800f) - 1f
+            assertEquals(
+                "x must equal the reference formula at width $w",
+                expected,
+                UfldLaneDetector.gridCellToLaneX(10, w),
+                0.01f
+            )
+        }
+    }
+
+    @Test
+    fun leftmostDecodableLaneIsNotClampedToTheEdge() {
+        // loc = 1 is the leftmost cell the model can emit. Its x must stay
+        // positive (inside the frame), not collapse to 0 — subtracting a whole
+        // cell before multiplying drove loc=1 to -1 px, which the caller's
+        // coerceIn(0, bitmap.width) clamped to the frame edge.
+        val x = UfldLaneDetector.gridCellToLaneX(1, 1280)
+        assertTrue("loc=1 must decode inside the frame, was $x", x > 1f)
     }
 }
 
