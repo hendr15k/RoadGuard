@@ -404,4 +404,56 @@ class AlertPolicyTest {
         assertEquals(WarningType.LaneDepartureLeft, evaluation.state.typeOrNull())
         assertEquals(AlertPhase.ACTIVE, evaluation.state.phaseOrNull())
     }
+
+    // --- clock hygiene -------------------------------------------------------
+
+    @Test
+    fun aBackwardsClockTickNeverProducesANegativeAge() {
+        feed(nowMs = 1_000, laneInfo = driftingLeft)
+        val evaluation = feed(nowMs = 500, laneInfo = driftingLeft)
+
+        val warning = evaluation.state as AlertState.Warning
+        assertTrue("ageMs must never go negative", warning.ageMs >= 0L)
+    }
+
+    @Test
+    fun aBackwardsClockTickRestartsConfirmationInsteadOfContinuingIt() {
+        feed(nowMs = 1_000, laneInfo = driftingLeft)
+        feed(nowMs = 1_000 + AlertPolicy.LANE_CONFIRM_MS, laneInfo = driftingLeft)
+        // Confirmed at 2 s; the clock then jumps back before the confirmation
+        // window would have elapsed, which is a gap by definition.
+        val afterJumpBack = feed(nowMs = 1_050, laneInfo = driftingLeft)
+
+        assertEquals(
+            "a backwards jump must not confirm on the old timeline",
+            AlertPhase.CONFIRMING,
+            afterJumpBack.state.phaseOrNull()
+        )
+        assertNull(afterJumpBack.signal)
+    }
+
+    @Test
+    fun aFutureStampedSampleIsNotTreatedAsFreshForever() {
+        // A sample stamped ahead of the gate's clock used to compute a negative
+        // age that never exceeded STALE_MS, so it stayed fresh forever.
+        val evaluation = policy.evaluate(
+            settings = AppSettings(),
+            laneInfo = driftingLeft.copy(timestamp = 10_000L),
+            distance = null,
+            nowMs = 1_000L
+        )
+
+        assertEquals(AlertState.Idle, evaluation.state)
+        assertNull(evaluation.signal)
+    }
+
+    @Test
+    fun snapshotNeverReportsANegativeAge() {
+        feed(nowMs = 5_000, laneInfo = driftingLeft)
+        // Reach in via a backwards evaluation, then read the snapshot too.
+        feed(nowMs = 4_000, laneInfo = driftingLeft)
+        assertTrue(policy.snapshot() is AlertState.Idle || policy.snapshot() is AlertState.Warning)
+        val warning = policy.snapshot() as? AlertState.Warning
+        if (warning != null) assertTrue(warning.ageMs >= 0L)
+    }
 }

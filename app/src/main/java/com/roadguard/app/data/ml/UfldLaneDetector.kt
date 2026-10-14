@@ -495,6 +495,12 @@ class UfldLaneDetector(private val context: Context) {
                     emaState.clear()
                     emaFrame.clear()
                     offsetHistory.clear()
+                    // The per-side marking support belongs to the OLD lane: a
+                    // new pair must start at neutral support, otherwise the
+                    // first frames' coverage is judged against paint that is
+                    // no longer the one being measured.
+                    leftSupport = 1f
+                    rightSupport = 1f
                 }
                 lastPair = pair
                 val left = reAnchor(lanes[li]!!, frame, bitmap)
@@ -541,6 +547,15 @@ class UfldLaneDetector(private val context: Context) {
             return holdLast()
         }
         val (side, rawPts) = single
+        // Mode change (pair -> single-side mirror): drop stale EMA/pair state so
+        // we neither blend old lane polylines into the mirrored one nor keep the
+        // old pair's hysteresis benefit an extra frame after the pair returns.
+        emaState.clear()
+        emaFrame.clear()
+        offsetHistory.clear()
+        leftSupport = 1f
+        rightSupport = 1f
+        egoGeometry.clearHeldPair()
         val pts = reAnchor(rawPts, frame, bitmap)
         val width = egoGeometry.widthOr(bitmap.width)
         val shiftedX = FloatArray(pts.size) { i ->
@@ -654,25 +669,16 @@ class UfldLaneDetector(private val context: Context) {
      */
     @Synchronized
     fun smoothedOffset(rawOffset: Float): Float {
+        // NaN guard mirrors LaneOffsetWindow.add: one non-finite reading would
+        // otherwise sit in the history forever (Kotlin sorts NaN as largest)
+        // and make every later offset comparison in the gate false.
+        if (!rawOffset.isFinite()) return peekSmoothedOffset()
         offsetHistory.addLast(rawOffset)
         while (offsetHistory.size > OFFSET_MEDIAN_N) offsetHistory.removeFirst()
-        val sorted = offsetHistory.sorted()
-        return sorted[sorted.size / 2]
-    }
-
-    /**
-     * The current offset median WITHOUT adding a sample.
-     *
-     * Used when this frame's offset is not a measurement (mirrored single side
-     * or a held sample). Feeding those guesses into [offsetHistory] would shift
-     * the median that later warns about a REAL pair: the gate caps the guess'
-     * confidence so it cannot warn itself, but the pollution outlives it.
-     */
-    @Synchronized
-    fun peekSmoothedOffset(): Float {
-        if (offsetHistory.isEmpty()) return 0f
-        val sorted = offsetHistory.sorted()
-        return sorted[sorted.size / 2]
+        val sorted = offsetHistory.filter { it.isFinite() }.sorted()
+        if (sorted.isEmpty()) return 0f
+        return if (sorted.size % 2 == 1) sorted[sorted.size / 2]
+        else (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2f
     }
 
     /** True once enough samples exist for the median to mean anything. */
@@ -683,6 +689,26 @@ class UfldLaneDetector(private val context: Context) {
 
     /** Measured ego lane width in image px, or 0 while nothing was measured. */
     fun measuredLaneWidthPx(): Float = egoGeometry.measuredWidth
+
+    /**
+     * The current offset median WITHOUT adding a sample.
+     *
+     * Used when this frame's offset is not a measurement (mirrored single side
+     * or a held sample). Feeding those guesses into [offsetHistory] would shift
+     * the median that later warns about a REAL pair: the gate caps the guess'
+     * confidence so it cannot warn itself, but the pollution outlives it.
+     *
+     * Non-finite samples are dropped before sorting (Kotlin orders NaN as the
+     * largest element, so one poisoned reading could otherwise become the
+     * median and silently disable every later comparison in the gate).
+     */
+    @Synchronized
+    fun peekSmoothedOffset(): Float {
+        val sorted = offsetHistory.filter { it.isFinite() }.sorted()
+        if (sorted.isEmpty()) return 0f
+        return if (sorted.size % 2 == 1) sorted[sorted.size / 2]
+        else (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2f
+    }
 
     private fun holdLast(): UfldResult {
         // Dashed lines / shadows: keep last lanes briefly, then decay.
@@ -699,7 +725,12 @@ class UfldLaneDetector(private val context: Context) {
 
     private fun smooth(side: String, cur: LanePoints): LanePoints {
         val prev = emaState[side]
-        val out = if (prev != null && prev.size == cur.size) {
+        // A lane that returns after the hold window must not be blended with
+        // its old geometry: the rows still align (the same anchor table), so
+        // the row check alone cannot tell a continuation from a reappearing
+        // lane, and blending it produced a phantom kink plus a stale offset.
+        val isStale = emaFrame[side]?.let { frameCounter - it > HOLD_FRAMES } ?: true
+        val out = if (prev != null && !isStale && prev.size == cur.size) {
             // Same point COUNT is not the same ROWS: UFLD skips a row whose
             // no-line cell wins, so a dropped row shifts every following index
             // and an index-wise EMA blends two different rows into a phantom

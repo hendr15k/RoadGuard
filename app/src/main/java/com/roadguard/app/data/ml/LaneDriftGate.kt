@@ -60,8 +60,14 @@ object LaneDriftGate {
     const val MAX_STEP_FRACTION = 0.5f
 
     /** Higher sensitivity narrows the window (1.5 - sensitivity, so 0.5 → 1.0). */
-    fun offsetFraction(sensitivity: Float): Float =
-        BASE_OFFSET_FRACTION * (1.5f - sensitivity)
+    fun offsetFraction(sensitivity: Float): Float {
+        // Clamp first: an out-of-range sensitivity (the settings slider bounds
+        // 0..1, but a hand-edited prefs value or a raw caller can pass more)
+        // inverted the window into a negative tolerance, so every offset
+        // compared as "no drift".
+        val s = if (sensitivity.isFinite()) sensitivity.coerceIn(0f, 1f) else 0.5f
+        return BASE_OFFSET_FRACTION * (1.5f - s)
+    }
 
     /**
      * The offset a departure must exceed, in pixels.
@@ -74,11 +80,29 @@ object LaneDriftGate {
         sensitivity: Float,
         laneWidth: Float = 0f
     ): Float {
+        if (frameWidth <= 0) return 0f
         val frameRelative = frameWidth * offsetFraction(sensitivity)
-        if (laneWidth <= 0f) return frameRelative
+        // A non-finite (or non-positive) width contributes no lane-relative
+        // floor: maxOf(frameRelative, NaN) would propagate the NaN and make
+        // every comparison in this gate false, i.e. silently disable it.
+        if (!laneWidth.isFinite() || laneWidth <= 0f) return frameRelative
         val laneRelative = RELATIVE_HALF_WIDTH_FRACTION * laneWidth / 2f
         return maxOf(frameRelative, laneRelative)
     }
+
+    /** True when a drift comparison with these inputs may warn at all. */
+    fun canWarn(
+        frameWidth: Int,
+        sensitivity: Float,
+        confidence: Float,
+        leftCurveValid: Boolean,
+        rightCurveValid: Boolean,
+        historySize: Int,
+        laneWidth: Float
+    ): Boolean = frameWidth > 0 && offsetFraction(sensitivity) > 0f &&
+        confidence.isFinite() && confidence > MIN_CONFIDENCE &&
+        leftCurveValid && rightCurveValid &&
+        historySize >= MIN_HISTORY && laneWidth.isFinite()
 
     /** True when the offset jumped further than a vehicle can move between samples. */
     fun isImplausibleStep(
@@ -86,7 +110,8 @@ object LaneDriftGate {
         currentOffset: Float,
         laneWidth: Float
     ): Boolean {
-        if (laneWidth <= 0f) return false
+        if (laneWidth <= 0f || !laneWidth.isFinite()) return false
+        if (!previousOffset.isFinite() || !currentOffset.isFinite()) return false
         return abs(currentOffset - previousOffset) > MAX_STEP_FRACTION * laneWidth
     }
 
@@ -105,7 +130,8 @@ object LaneDriftGate {
         rightCurveValid: Boolean,
         historySize: Int = MIN_HISTORY,
         laneWidth: Float = 0f
-    ): Boolean = usablePair(confidence, leftCurveValid, rightCurveValid, historySize) &&
+    ): Boolean = canWarn(frameWidth, sensitivity, confidence, leftCurveValid, rightCurveValid, historySize, laneWidth) &&
+        centerOffset.isFinite() &&
         centerOffset < -thresholdPx(frameWidth, sensitivity, laneWidth)
 
     fun isDriftingRight(
@@ -117,7 +143,8 @@ object LaneDriftGate {
         rightCurveValid: Boolean,
         historySize: Int = MIN_HISTORY,
         laneWidth: Float = 0f
-    ): Boolean = usablePair(confidence, leftCurveValid, rightCurveValid, historySize) &&
+    ): Boolean = canWarn(frameWidth, sensitivity, confidence, leftCurveValid, rightCurveValid, historySize, laneWidth) &&
+        centerOffset.isFinite() &&
         centerOffset > thresholdPx(frameWidth, sensitivity, laneWidth)
 
     private fun usablePair(
@@ -125,7 +152,7 @@ object LaneDriftGate {
         leftCurveValid: Boolean,
         rightCurveValid: Boolean,
         historySize: Int
-    ): Boolean = confidence > MIN_CONFIDENCE && leftCurveValid && rightCurveValid &&
+    ): Boolean = confidence.isFinite() && confidence > MIN_CONFIDENCE && leftCurveValid && rightCurveValid &&
         historySize >= MIN_HISTORY
 }
 
@@ -143,9 +170,17 @@ class LaneOffsetWindow(private val windowSize: Int = DEFAULT_WINDOW) {
     companion object {
         /** ~1.4 s at the 5 Hz analyzer rate, matching the UFLD offset median. */
         const val DEFAULT_WINDOW = 7
+
+        init {
+            require(DEFAULT_WINDOW > 0) { "windowSize must be > 0" }
+        }
     }
 
     private val history = ArrayDeque<Float>()
+
+    init {
+        require(windowSize > 0) { "windowSize must be > 0" }
+    }
 
     /** Number of samples collected so far, for the gate's history floor. */
     val size: Int get() = history.size
@@ -165,6 +200,6 @@ class LaneOffsetWindow(private val windowSize: Int = DEFAULT_WINDOW) {
     private fun median(): Float {
         if (history.isEmpty()) return 0f
         val sorted = history.sorted()
-        return sorted[sorted.size / 2]
+        return if (sorted.size % 2 == 1) sorted[sorted.size / 2] else (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2f
     }
 }

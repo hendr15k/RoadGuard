@@ -74,7 +74,9 @@ class DriveSession(private val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
     private val entries = ArrayDeque<AlertLogEntry>()
 
     fun start(nowMs: Long) {
-        if (startedAtMs == 0L) startedAtMs = nowMs
+        // No 0L sentinel: a session that legitimately starts at epoch 0 must be
+        // accepted, and reset() below restarts the clock explicitly.
+        startedAtMs = nowMs
     }
 
     /** Records a fired alarm. Returns true when it was a new hazard incident. */

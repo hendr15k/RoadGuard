@@ -60,6 +60,16 @@ class EgoLaneGeometry {
 
     val measuredWidth: Float get() = widthPrior
 
+    /**
+     * Drops only the pair hysteresis, keeping the learned width prior.
+     * The width prior is stable across mode changes (it describes the road,
+     * not the current detection), but the pair choice belongs to the current
+     * detection mode and must not give a stale pair a bonus later.
+     */
+    fun clearHeldPair() {
+        heldPair = null
+    }
+
     fun reset() {
         widthPrior = 0f
         heldPair = null

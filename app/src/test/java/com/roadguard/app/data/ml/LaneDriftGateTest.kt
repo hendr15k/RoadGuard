@@ -189,4 +189,110 @@ class LaneDriftGateTest {
         // Without a measured lane there is nothing to judge against.
         assertFalse(LaneDriftGate.isImplausibleStep(0f, 5000f, 0f))
     }
+
+    // --- hardening: non-finite / out-of-range inputs -------------------------
+
+    @Test
+    fun anOutOfRangeSensitivityCannotInvertTheWindow() {
+        // The settings clamp 0..1, but a hand-edited prefs value or a raw
+        // caller could pass more, and 0.04 * (1.5 - sensitivity) went negative
+        // — a negative threshold, i.e. a gate that silently never fires.
+        assertTrue(
+            "sensitivity above the UI max must clamp, not invert",
+            LaneDriftGate.offsetFraction(2.0f) > 0f
+        )
+        assertTrue(
+            "a wildly out-of-range sensitivity must not disable the gate",
+            LaneDriftGate.isDriftingLeft(
+                centerOffset = -beyondGate - 10f,
+                frameWidth = width,
+                sensitivity = 5f,
+                confidence = 0.8f,
+                leftCurveValid = true,
+                rightCurveValid = true
+            )
+        )
+        // A non-finite sensitivity must not poison the threshold either.
+        assertTrue(LaneDriftGate.thresholdPx(width, Float.NaN).isFinite())
+        assertTrue(LaneDriftGate.thresholdPx(width, Float.POSITIVE_INFINITY).isFinite())
+    }
+
+    @Test
+    fun aNonFiniteOffsetOrWidthNeverWarns() {
+        assertFalse(
+            "NaN offset must not be a drift",
+            LaneDriftGate.isDriftingLeft(
+                centerOffset = Float.NaN,
+                frameWidth = width,
+                sensitivity = sensitivity,
+                confidence = 0.8f,
+                leftCurveValid = true,
+                rightCurveValid = true
+            )
+        )
+        assertFalse(
+            "NaN offset must not be a drift to the right either",
+            LaneDriftGate.isDriftingRight(
+                centerOffset = Float.NaN,
+                frameWidth = width,
+                sensitivity = sensitivity,
+                confidence = 0.9f,
+                leftCurveValid = true,
+                rightCurveValid = true
+            )
+        )
+        assertFalse(
+            "an infinite confidence is not a valid confidence",
+            LaneDriftGate.isDriftingRight(
+                centerOffset = beyondGate + 10f,
+                frameWidth = width,
+                sensitivity = sensitivity,
+                confidence = Float.POSITIVE_INFINITY,
+                leftCurveValid = true,
+                rightCurveValid = true
+            )
+        )
+        // A NaN lane width must not turn the threshold into NaN (every
+        // comparison would then be false and the gate silently inert).
+        assertTrue(
+            LaneDriftGate.thresholdPx(width, sensitivity, Float.NaN).isFinite()
+        )
+        assertFalse(
+            LaneDriftGate.isDriftingRight(
+                centerOffset = beyondGate + 10f,
+                frameWidth = width,
+                sensitivity = sensitivity,
+                confidence = 0.8f,
+                leftCurveValid = true,
+                rightCurveValid = true,
+                laneWidth = Float.NaN
+            )
+        )
+    }
+
+    @Test
+    fun anImplausibleStepCheckSurvivesNonFiniteOffsets() {
+        assertFalse(
+            "a NaN previous offset is not proof of an implausible step",
+            LaneDriftGate.isImplausibleStep(Float.NaN, 0f, 500f)
+        )
+        assertFalse(
+            "a NaN current offset is not proof of an implausible step",
+            LaneDriftGate.isImplausibleStep(0f, Float.NaN, 500f)
+        )
+        assertFalse(
+            "a NaN lane width cannot judge a step",
+            LaneDriftGate.isImplausibleStep(0f, 5000f, Float.NaN)
+        )
+    }
+
+    @Test
+    fun aNonPositiveFrameWidthNeverWarns() {
+        assertFalse(
+            LaneDriftGate.isDriftingLeft(-beyondGate - 10f, 0, sensitivity, 0.9f, true, true)
+        )
+        assertFalse(
+            LaneDriftGate.isDriftingRight(beyondGate + 10f, -1, sensitivity, 0.9f, true, true)
+        )
+    }
 }

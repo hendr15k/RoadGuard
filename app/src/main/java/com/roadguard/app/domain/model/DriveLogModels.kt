@@ -66,8 +66,38 @@ data class DriveRecord(
                 collisionCount = stats.collisionCount,
                 urgentCollisionCount = stats.urgentCollisionCount,
                 warningTimeMs = stats.warningTimeMs,
-                safetyScore = stats.safetyScore
+                // Derived from the PERSISTED start/end, not from the live
+                // snapshot's nowMs: the archiver ends the drive at a time that
+                // may differ from the last stats tick, and the two must agree
+                // or the history row reports a score for another duration.
+                safetyScore = safetyScoreOf(
+                    startedAtMs = stats.startedAtMs,
+                    endedAtMs = endedAtMs,
+                    laneDepartureCount = stats.laneDepartureCount,
+                    collisionCount = stats.collisionCount,
+                    urgentCollisionCount = stats.urgentCollisionCount
+                )
             )
+
+        /**
+         * The scoring rule of [DriveSessionStats.safetyScore], recomputed from
+         * explicit bounds so the mapping and the snapshot cannot drift apart.
+         */
+        fun safetyScoreOf(
+            startedAtMs: Long,
+            endedAtMs: Long,
+            laneDepartureCount: Int,
+            collisionCount: Int,
+            urgentCollisionCount: Int
+        ): Int {
+            val durationMs = (endedAtMs - startedAtMs).coerceAtLeast(0L)
+            if (durationMs <= 0L) return 100
+            val minutes = durationMs / 60_000f
+            val totalIncidents = laneDepartureCount + collisionCount
+            val ratePenalty = ((totalIncidents / minutes) * 8f).toInt()
+            val severityPenalty = collisionCount * 10 + urgentCollisionCount * 10
+            return (100 - ratePenalty - severityPenalty).coerceIn(0, 100)
+        }
     }
 }
 
@@ -82,12 +112,11 @@ private val STARTED_FORMAT = SimpleDateFormat("dd.MM. HH:mm", Locale.US)
  * app start parse it, and an oldest-first list forces the UI to sort
  * on every render.
  */
-class DriveLog(private val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
+class DriveLog(val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
 
     companion object {
         const val DEFAULT_MAX_ENTRIES = 30
     }
-
     private val _records = ArrayDeque<DriveRecord>()
 
     /** Newest drive first — the order the history screen renders. */

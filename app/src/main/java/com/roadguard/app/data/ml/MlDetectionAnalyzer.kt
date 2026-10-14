@@ -178,13 +178,16 @@ class MlDetectionAnalyzer(
             imageProxy.close()
             return
         }
-        lastProcessTime = currentTime
 
         val mediaImage = imageProxy.image
         if (mediaImage == null) {
+            // Do not charge the throttle slot for a frame that never reached
+            // processing: a null-image frame used to burn the 200 ms window and
+            // pushed the next real frame up to a full interval later.
             imageProxy.close()
             return
         }
+        lastProcessTime = currentTime
 
         // === ImageProxy-Lifecycle: WICHTIG ===
         // ML Kit ObjectDetector ist async. Wenn wir imageProxy.close() synchron
@@ -615,8 +618,18 @@ class MlDetectionAnalyzer(
             .addOnFailureListener {
                 // closed ist @Volatile, der Read unter Lock serialisiert
                 // zusätzlich gegen einen parallel laufenden Success-Callback.
+                // The tracking state must go with the reading: keeping
+                // prevDistance/prevTime/distanceHistory/trackedBox lets the next
+                // success on a DIFFERENT vehicle inherit the previous one's
+                // history, so a new car's first sample reports a plausible
+                // looking relative speed and TTC computed from stale points.
                 synchronized(detectorLock) {
                     if (closed) return@addOnFailureListener
+                    distanceHistory.clear()
+                    prevDistance = null
+                    prevTime = 0L
+                    trackedBox = null
+                    vehicleSampleAtMs = 0L
                     _vehicleDistance.value = null
                 }
             }

@@ -387,10 +387,16 @@ class VideoMlAnalyzer(
                 }
             }
             .addOnFailureListener {
-                // closed ist @Volatile, der Read unter Lock serialisiert
-                // zusätzlich gegen einen parallel laufenden Success-Callback.
+                // Same as the camera path: dropping the reading without the
+                // tracking state lets the next success inherit a stale history
+                // and report a relative speed/TTC for a vehicle that is gone.
                 synchronized(detectorLock) {
                     if (closed) return@addOnFailureListener
+                    distanceHistory.clear()
+                    prevDistance = null
+                    prevTime = 0L
+                    trackedBox = null
+                    vehicleSampleAtMs = 0L
                     _vehicleDistance.value = null
                 }
             }
