@@ -52,6 +52,23 @@ class HudTimelineTest {
     }
 
     @Test
+    fun aFutureDatedSampleIsDropped() {
+        // A clock that jumped backwards after the sample was stamped (NTP
+        // correction, manual change) gives a NEGATIVE delta, which satisfies
+        // `<= STALE_MS` forever. The HUD would keep showing the value while
+        // AlertPolicy.isSampleStale() had already dropped the matching alarm —
+        // the display promising a hazard the safety logic cleared. The HUD and
+        // the gate now reject a future stamp identically.
+        val now = 1_000_000L
+
+        assertEquals(null, distanceAt(now + 500, now))
+        assertEquals(null, laneAt(now + 500, now))
+        // Even a moment's skew must not be treated as "fresh".
+        assertEquals(null, distanceAt(now + 1, now))
+        assertEquals(null, laneAt(now + 1, now))
+    }
+
+    @Test
     fun theHudSharesTheGatesOwnStalenessWindow() {
         // A second, separately tuned window here is how the display and the
         // alarm drift apart again.

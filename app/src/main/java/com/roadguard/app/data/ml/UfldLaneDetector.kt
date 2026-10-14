@@ -89,8 +89,16 @@ class UfldLaneDetector(private val context: Context) {
          * systematic ~1 % outward bias (about 10 px near the right edge at 1280p).
          */
         fun gridCellToLaneX(location: Number, imageWidth: Int): Float {
+            // `location` is the soft-argmax of the 100 scoring cells with weights
+            // 1..100, so a value of 1 must land on the FIRST linspace sample
+            // (index 0), not on the second. The previous `loc * cellWidth` read
+            // one cell too far to the right — exactly `cellWidth*imageWidth/INPUT_W`
+            // = the ~13 px overhang the existing test pins. The +1 reset to a
+            // zero-based index removes it. The trailing `-imageWidth/CFG_W` is the
+            // documented -1 px reference offset, scaled to the image.
             val cellWidth = (INPUT_W - 1f) / (GRIDING_NUM - 1f)
-            return location.toFloat() * cellWidth * imageWidth / INPUT_W - imageWidth / CFG_W
+            val idx = location.toFloat() - 1f
+            return idx.coerceAtLeast(0f) * cellWidth * imageWidth / INPUT_W - imageWidth / CFG_W
         }
 
         private const val MIN_POINTS = 3
@@ -482,7 +490,7 @@ class UfldLaneDetector(private val context: Context) {
             val pair = egoGeometry.choosePair(candidates, bitmap.width)
             val sizes = lanes.map { it?.size ?: 0 }
             if (pair == null) {
-                singleSide(lanes, bitmap, frame, sizes)
+                singleSide(lanes, bitmap, sizes)
             } else {
                 val (li, ri) = pair
                 // A changed pair is a lane change (or a model re-slot). The
@@ -503,8 +511,8 @@ class UfldLaneDetector(private val context: Context) {
                     rightSupport = 1f
                 }
                 lastPair = pair
-                val left = reAnchor(lanes[li]!!, frame, bitmap)
-                val right = reAnchor(lanes[ri]!!, frame, bitmap)
+                val left = reAnchor(lanes[li]!!, bitmap)
+                val right = reAnchor(lanes[ri]!!, bitmap)
                 val leftSm = smooth("L", left)
                 val rightSm = smooth("R", right)
                 val (rawOffset, conf) = evaluate(leftSm, rightSm, bitmap.width, bitmap.height, mirrored = false)
@@ -535,7 +543,6 @@ class UfldLaneDetector(private val context: Context) {
     private fun singleSide(
         lanes: Array<LanePoints?>,
         bitmap: Bitmap,
-        frame: Frame,
         sizes: List<Int>
     ): UfldResult {
         val single = singleSideLane(lanes, bitmap.width, bitmap.height, hoodFraction)
@@ -556,7 +563,7 @@ class UfldLaneDetector(private val context: Context) {
         leftSupport = 1f
         rightSupport = 1f
         egoGeometry.clearHeldPair()
-        val pts = reAnchor(rawPts, frame, bitmap)
+        val pts = reAnchor(rawPts, bitmap)
         val width = egoGeometry.widthOr(bitmap.width)
         val shiftedX = FloatArray(pts.size) { i ->
             egoGeometry.oppositeBoundaryX(pts.x[i], side == "L", bitmap.width)
@@ -588,10 +595,8 @@ class UfldLaneDetector(private val context: Context) {
      * when it improves how well the curve sits on paint, so a frame without
      * visible markings keeps the model's own output.
      */
-    private fun reAnchor(pts: LanePoints, frame: Frame, bitmap: Bitmap): LanePoints {
+    private fun reAnchor(pts: LanePoints, bitmap: Bitmap): LanePoints {
         val isLeftSide = pts.xBottom < bitmap.width / 2f
-        val scaleX = bitmap.width.toFloat() / INPUT_W
-        val scaleY = bitmap.height.toFloat() / INPUT_H
         // Measure in IMAGE pixels; the renderer maps them onto the model-grid
         // mask itself, so the mask is baked once per frame and never per sample.
         val (deviation, supportBefore) = markingMeasurer.measure(pts.x, pts.y, bitmap.width, bitmap.height, hoodFraction)
@@ -850,9 +855,8 @@ class UfldLaneDetector(private val context: Context) {
                 // Reference x formula uses linspace(0, INPUT_W-1, GRIDING_NUM).
                 // Row-axis pairing: base=(NUM_ROWS-1-row) reads bottom-up, so the
                 // anchor must use the same axis (NUM_ROWS-1-row).
-                val pyCfg = CFG_H * (ROW_ANCHORS[NUM_ROWS - 1 - row] / INPUT_H.toFloat()) - 1f
                 xs.add(gridCellToLaneX(loc, imgW))
-                ys.add(pyCfg * imgH / CFG_H)
+                ys.add(ROW_ANCHORS[NUM_ROWS - 1 - row] * imgH / INPUT_H.toFloat() - 1f)
             }
             if (xs.size >= MIN_POINTS) {
                 lanes[lane] = LanePoints(xs.toFloatArray(), ys.toFloatArray(), lane)

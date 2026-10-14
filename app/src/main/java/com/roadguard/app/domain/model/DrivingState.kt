@@ -34,9 +34,16 @@ data class LaneInfo(
  * dropped the matching alarm — the display promised a hazard the safety logic
  * had cleared. Shares [AlertPolicy.STALE_MS] so display and alarm cannot drift
  * apart; the boundary is inclusive, matching the gate's `> STALE_MS` test.
+ *
+ * A FUTURE timestamp is rejected for the same reason [AlertPolicy] rejects one:
+ * a clock stepped backwards (NTP, manual change) between the analyser that
+ * stamped the sample and the HUD reading it makes `nowMs - timestamp`
+ * negative, and a negative delta satisfies `<= STALE_MS` forever. Without the
+ * check the stale sample stays on screen while the alarm gate has long dropped
+ * the matching hazard — the exact drift this helper exists to prevent.
  */
 fun LaneInfo.isFresh(nowMs: Long = System.currentTimeMillis()): Boolean =
-    nowMs - timestamp <= AlertPolicy.STALE_MS
+    timestamp <= nowMs && nowMs - timestamp <= AlertPolicy.STALE_MS
 
 data class VehicleDistance(
     val distanceMeters: Float,
@@ -46,9 +53,9 @@ data class VehicleDistance(
     val timestamp: Long = System.currentTimeMillis()
 )
 
-/** See [LaneInfo.isFresh] — same window, same boundary. */
+/** See [LaneInfo.isFresh] — same window, same boundary, same future rejection. */
 fun VehicleDistance.isFresh(nowMs: Long = System.currentTimeMillis()): Boolean =
-    nowMs - timestamp <= AlertPolicy.STALE_MS
+    timestamp <= nowMs && nowMs - timestamp <= AlertPolicy.STALE_MS
 
 sealed class WarningType {
     data object LaneDepartureLeft : WarningType()

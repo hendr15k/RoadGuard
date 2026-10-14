@@ -123,11 +123,12 @@ class UfldLaneDetectorTest {
 
     @Test
     fun gridCellMapsToOfficialLanePosition() {
-        // Official UFLD reference: col_sample = linspace(0, 800-1, 100), so one
-        // grid cell is (800-1)/(100-1) px wide, and x = loc * cellW * W/800 - W/1280.
-        // The old code used 800/100 = 8.0 px (a ~1 % / ~10 px systematic bias).
+        // Official UFLD reference (ibaiGorordo + cfzd + the conformance doc):
+        // soft-argmax yields a 1-based cell index, the sampling axis is
+        // linspace(0, 800-1, 100), so x = (loc-1) * cellW * W/800 - W/1280.
+        // The previous 1-based reading shifted every lane ~13 px to the right.
         val cell = 50
-        val expected = (cell * (799f / 99f) * 1280f / 800f) - 1f
+        val expected = ((cell - 1) * (799f / 99f) * 1280f / 800f) - 1f
         assertEquals(expected, UfldLaneDetector.gridCellToLaneX(cell, 1280), 0.01f)
     }
 }

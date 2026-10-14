@@ -252,7 +252,10 @@ object LaneGeometry {
         val extra = max(0f, (evalRow - botY) / span)
         val penalty = (1f - (extra - FREE_EXTRAPOLATION) / 0.6f)
             .coerceIn(EXTRAPOLATION_FLOOR, 1f)
-        return cov * penalty * (0.6f + 0.4f * markingSupport.coerceIn(0f, 1f))
+        // The 0.6 offset was the defect: markingSupport=0 is an explicit "I found
+        // nothing" result from measure(), and 0.6*1 still let unsupported lanes
+        // clear the 0.4 alert floor. Support is evidence — scale by it directly.
+        return cov * penalty * markingSupport.coerceIn(0f, 1f)
     }
 
     /**

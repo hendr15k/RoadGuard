@@ -168,6 +168,12 @@ fun MainScreen(
     ) { uri: Uri? ->
         uri?.let {
             viewModel.clearDetectionState()
+            // The live camera analyzer cannot be reset from here (it lives inside
+            // CameraPreview); its EMA/offset history survives a video pick and is
+            // dropped implicitly when CameraPreview's DisposableEffect runs
+            // mlAnalyzer.close() in the onDispose. We only need to drop the video
+            // analyzer state, which we own above.
+            videoAnalyzer?.resetDetectionState()
             videoUri = it
             showVideoPicker = true
         }
@@ -256,6 +262,10 @@ fun MainScreen(
                             videoUri = null
                             showVideoPicker = false
                             viewModel.clearDetectionState()
+                            // Back to camera: the live analyzer is created fresh
+                            // when CameraPreview recomposes; drop the (now
+                            // closing) video analyzer state so it cannot bleed.
+                            if (videoUri != null) videoAnalyzer?.resetDetectionState()
                         },
                         modifier = Modifier
                             .align(Alignment.BottomStart)
@@ -364,16 +374,24 @@ fun CameraPreview(
     onDistanceUpdate: (com.roadguard.app.domain.model.VehicleDistance) -> Unit,
     appContext: Context? = null,
     settings: com.roadguard.app.domain.model.AppSettings,
-    onDistanceUpdateFrom: (com.roadguard.app.domain.model.VehicleDistance?) -> Unit = { it?.let(onDistanceUpdate) }
+    onDistanceUpdateFrom: (com.roadguard.app.domain.model.VehicleDistance?) -> Unit = { it?.let(onDistanceUpdate) },
+    passedAnalyzer: MlDetectionAnalyzer? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // Key mit appContext: bei Context-Wechsel (z.B. Config-Change mit DI-Swap)
     // wird der Analyzer sauber neu erzeugt. Mit Unit oder ohne Key würde
-    // der alte Analyzer geleaked.
+    // der alte Analyzer geleakt.
+    // The analyzer is hoisted to MainScreen so a source switch (camera -> video
+    // -> camera) can drop its temporal state from the same scope that owns it;
+    // when the caller passes one in, that instance is used unchanged.
     val mlAnalyzer = remember(appContext) {
-        MlDetectionAnalyzer(vehicleThreshold = 20f, laneSensitivity = 0.5f, appContext = appContext)
+        passedAnalyzer ?: MlDetectionAnalyzer(
+            vehicleThreshold = 20f,
+            laneSensitivity = 0.5f,
+            appContext = appContext
+        )
     }
 
     LaunchedEffect(settings.minFollowingDistanceMeters, settings.laneDepartureSensitivity, settings.hoodFraction) {

@@ -77,8 +77,14 @@ class EgoLaneSelector {
         widthBuffer.addLast(pairWidth)
         if (widthBuffer.size > 15) widthBuffer.removeFirst()
         if (widthBuffer.size < 6) return expectedWidth
+        // Same median rule as LaneOffsetWindow/Kotlin's median: an even buffer
+        // must average the two middle samples. Returning sorted[n/2] (the upper
+        // middle) biases the learned width by up to a quarter of the sample
+        // spacing, and this prior drives the pair score and the single-side
+        // mirror distance.
         val sorted = widthBuffer.sorted()
-        val median = sorted[sorted.size / 2]
+        val mid = sorted.size / 2
+        val median = if (sorted.size % 2 == 1) sorted[mid] else (sorted[mid - 1] + sorted[mid]) / 2f
         if (kotlin.math.abs(pairWidth - median) < 0.25f * median) {
             expectedWidth = if (expectedWidth > 0f) expectedWidth * 0.7f + median * 0.3f else median
         }

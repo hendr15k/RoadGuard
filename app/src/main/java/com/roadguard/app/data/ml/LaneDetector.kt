@@ -58,9 +58,17 @@ class LaneDetector(
         sensitivity = value.coerceIn(0f, 1f)
     }
 
-    /** Bottom share of the frame covered by the hood: excluded from detection. */
+    /**
+     * Bottom share of the frame covered by the hood: excluded from detection.
+     * Defaults to the same 8 % band [LaneGeometry] and the UFLD detector
+     * exclude, so the classic-CV fallback does not read the bonnet as road
+     * before the first settings update arrives — the classic path runs on the
+     * first frames while the TFLite model is still loading, which is exactly
+     * when the default bites.
+     */
     @Volatile
-    private var hoodFraction: Float = 0f
+    var hoodFraction: Float = LaneGeometry.HOOD_EXCLUSION_FRACTION
+        private set
 
     fun updateHoodFraction(value: Float) {
         hoodFraction = value.coerceIn(0f, 0.5f)

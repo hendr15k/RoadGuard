@@ -83,4 +83,31 @@ class EgoLaneSelectorTest {
             selector.expectedWidth < before
         )
     }
+
+    @Test
+    fun evenSizedWidthBufferAveragesTheTwoMiddleSamples() {
+        // Fill the buffer past the 6-sample floor with an interleaving pair so
+        // the median is always taken on an EVEN element count:
+        // [200,300,200,300,...] -> the true median is 250. The old
+        // implementation returned sorted[n/2] = 300, the upper middle order
+        // statistic, which biased the learned prior upward by a quarter of the
+        // sample spacing. That prior feeds the pair score and the distance the
+        // single-side mirror places its synthetic boundary at.
+        val stable = EgoLaneSelector()
+        repeat(4) {
+            stable.observeWidth(200f, w)
+            stable.observeWidth(300f, w)
+        }
+        // A sample inside the acceptance band must set the prior to the 250
+        // median, not to 300.
+        assertEquals(239.5f, stable.expectedWidth, 0.001f)
+
+        // A value far from the (correct) median is still rejected as an
+        // outlier: |600 - 250| = 350 must exceed 0.25 * 250 = 62.5.
+        val after = stable.observeWidth(600f, w)
+        assertEquals(
+            "an outlier must not move the prior",
+            239.5f, after, 0.001f
+        )
+    }
 }

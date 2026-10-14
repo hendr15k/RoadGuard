@@ -138,6 +138,25 @@ class MlDetectionAnalyzer(
 
     private val modelLock = Any()
 
+    /**
+     * Dropped temporal state, for a source/mode switch (camera -> video and
+     * back). Both detectors and the two offset windows hold the previous
+     * source's geometry: [LaneDetector]'s priors and [UfldLaneDetector]'s
+     * EMA, ego-width prior and offset median survive a mode change, so the
+     * first frames of the new mode are blended with the old lane and the drift
+     * gate sees a phantom offset. Hold the detector lock while changing this
+     * so an in-flight frame (video path runs synchronously on the same lock)
+     * cannot observe half-reset state.
+     */
+    fun resetDetectionState() {
+        synchronized(detectorLock) {
+            laneDetector.reset()
+            classicOffsetWindow.reset()
+            classicPrevOffset = null
+            ufldDetector?.reset()
+        }
+    }
+
     private fun ensureUfldLoaded(): UfldLaneDetector? {
         ufldDetector?.takeIf { it.isLoaded() }?.let {
             it.updateHoodFraction(hoodFraction)
