@@ -48,8 +48,8 @@ android {
         applicationId = "com.roadguard.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 26
-        versionName = "v1.0.66"
+        versionCode = 27
+        versionName = "v1.0.67"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
