@@ -53,6 +53,29 @@ class DriveArchiverTest {
     }
 
     @Test
+    fun theMappedScoreFollowsTheEndTimeNotTheSnapshot() {
+        // The archive call can happen seconds after the stats snapshot; the
+        // score must be computed from the PERSISTED duration (endedAtMs), not
+        // from the snapshot's nowMs, or the history row disagrees with its own
+        // duration column.
+        val stats = DriveSessionStats(
+            startedAtMs = 0L,
+            nowMs = 120_000L,          // snapshot frozen at 2 minutes
+            laneDepartureCount = 4
+        )
+
+        val record = DriveRecord.from(stats, endedAtMs = 300_000L)  // filed at 5 minutes
+
+        assertEquals(300_000L, record.durationMs)
+        // Recomputed from the PERSISTED duration: 5 minutes, 4 lane
+        // departures → rate penalty 8 * (4/5) = 6.4 → 6, so 100 − 6 = 94.
+        // The old behaviour copied the snapshot's score, computed over the
+        // 2-minute rate: 8 * (4/2) = 16 → 84.
+        assertEquals(94, record.safetyScore)
+        assertEquals(84, stats.safetyScore)
+    }
+
+    @Test
     fun aCleanSubSecondOpeningIsDropped() {
         val stats = DriveSessionStats(startedAtMs = 0L, nowMs = 200L)
 

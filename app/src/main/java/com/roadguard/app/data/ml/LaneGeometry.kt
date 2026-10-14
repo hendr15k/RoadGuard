@@ -49,8 +49,10 @@ object LaneGeometry {
     const val HOOD_EXCLUSION_FRACTION = 0.08f
 
     /** First row that is still road: everything at or below is hood. */
-    fun hoodTop(frameHeight: Int, fraction: Float = HOOD_EXCLUSION_FRACTION): Float =
-        frameHeight * (1f - fraction.coerceIn(0f, 0.5f))
+    fun hoodTop(frameHeight: Int, fraction: Float = HOOD_EXCLUSION_FRACTION): Float {
+        if (!fraction.isFinite() || frameHeight <= 0) return frameHeight.toFloat()
+        return frameHeight * (1f - fraction.coerceIn(0f, 0.5f))
+    }
 
     /**
      * Drop decoded points sitting on the hood. Returns null when fewer than
@@ -62,6 +64,10 @@ object LaneGeometry {
         fraction: Float = HOOD_EXCLUSION_FRACTION
     ): UfldLaneDetector.LanePoints? {
         if (pts == null || frameHeight <= 0) return pts
+        // fraction was passed through Float.coerceIn, but NaN operands compare
+        // false in coerceIn and survive as NaN: handle that at the entry instead
+        // of letting y < NaN turn every road point upside-down.
+        if (!fraction.isFinite()) return pts
         if (fraction <= 0f) return pts
         val top = hoodTop(frameHeight, fraction)
         var keep = 0
@@ -201,7 +207,7 @@ object LaneGeometry {
         frameHeight: Int,
         hoodFraction: Float
     ): Boolean {
-        if (pts == null || pts.size < 3 || frameHeight <= 0) return false
+        if (pts == null || pts.size < 3 || frameHeight <= 0 || !hoodFraction.isFinite()) return false
         val (_, topY) = top(pts)
         val (_, botY) = bottom(pts)
         // The hood clip shortens every polyline BEFORE this gate runs, so the
@@ -240,7 +246,9 @@ object LaneGeometry {
         val (_, botY) = bottom(pts)
         val span = botY - topY
         if (span <= 1f) return 0f
-        val cov = min(1f, span / (FULL_SPAN_FRACTION * frameHeight))
+        // Camera/video model (camera has good coverage on 1920px class images).
+    val cov = min(1f, span / (FULL_SPAN_FRACTION * frameHeight))
+    if (!cov.isFinite()) return 0f
         val extra = max(0f, (evalRow - botY) / span)
         val penalty = (1f - (extra - FREE_EXTRAPOLATION) / 0.6f)
             .coerceIn(EXTRAPOLATION_FLOOR, 1f)

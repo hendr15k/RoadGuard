@@ -74,7 +74,7 @@ class AlertPolicy {
     private var repeatCount: Int = 0
     private var lastSeenMs: Long = 0
 
-    fun snapshot(): AlertState = buildState(ageMs = if (lastSeenMs > 0) lastSeenMs - hazardStartMs else 0)
+    fun snapshot(): AlertState = buildState(ageMs = if (lastSeenMs > 0) (lastSeenMs - hazardStartMs).coerceAtLeast(0L) else 0L)
 
     fun reset() {
         current = null
@@ -98,15 +98,21 @@ class AlertPolicy {
         if (hazard == null) {
             // Brief dropouts (one missed frame) must not reset a pending hazard,
             // but silence that outlives the grace period clears it.
-            val silenceMs = nowMs - lastSeenMs
+            val silenceMs = (nowMs - lastSeenMs).coerceAtLeast(0L)
             if (current == null || silenceMs > ABSENCE_GRACE_MS) {
                 reset()
                 return AlertEvaluation(AlertState.Idle, null)
             }
-            return AlertEvaluation(buildState(ageMs = nowMs - hazardStartMs), null)
+            return AlertEvaluation(buildState(ageMs = (nowMs - hazardStartMs).coerceAtLeast(0L)), null)
         }
 
-        if (current != hazard || nowMs - lastSeenMs > (if (confirmedAtMs > 0L) OBSERVATION_GAP_MS else STALE_MS)) {
+        // A clock that jumped backwards is a gap by definition: treat it as
+        // "unrelated hazard" so confirmation restarts instead of silently
+        // continuing the old one.
+        val rawGapMs = nowMs - lastSeenMs
+        val gapMs = if (rawGapMs < 0L) (if (confirmedAtMs > 0L) OBSERVATION_GAP_MS else STALE_MS) + 1L
+            else rawGapMs
+        if (current != hazard || gapMs > (if (confirmedAtMs > 0L) OBSERVATION_GAP_MS else STALE_MS)) {
             // New hazard (or a long detection gap): confirmation starts over.
             // A pending hazard expires quicker (STALE_MS) than an already
             // confirmed alarm (OBSERVATION_GAP_MS) — otherwise a 2 s
@@ -120,7 +126,7 @@ class AlertPolicy {
         }
         lastSeenMs = nowMs
 
-        val ageMs = nowMs - hazardStartMs
+        val ageMs = (nowMs - hazardStartMs).coerceAtLeast(0L)
         val confirmMs = if (hazard is WarningType.ForwardCollision) {
             COLLISION_CONFIRM_MS
         } else {
@@ -153,6 +159,19 @@ class AlertPolicy {
         return AlertEvaluation(buildState(ageMs), null)
     }
 
+    private fun elapsedSince(sampleAtMs: Long, nowMs: Long): Long =
+        (nowMs - sampleAtMs).coerceAtLeast(0L)
+
+    /**
+     * True when the sample is older than [STALE_MS].
+     *
+     * The coercion alone is not enough: a sample stamped in the FUTURE (clock
+     * skew between the analyser that produced it and the clock used here)
+     * coerces to 0 and would count as fresh forever. Reject those explicitly.
+     */
+    private fun isSampleStale(sampleAtMs: Long, nowMs: Long): Boolean =
+        sampleAtMs > nowMs || elapsedSince(sampleAtMs, nowMs) > STALE_MS
+
     private fun collisionHazard(
         settings: AppSettings,
         distance: VehicleDistance?,
@@ -163,7 +182,7 @@ class AlertPolicy {
         // A distance sample computed from an old frame must not hold an alarm
         // (e.g. paused video, stalled pipeline). Fresh samples carry the frame's
         // capture timestamp; a sample that never updates is treated as stale.
-        if (nowMs - distance.timestamp > STALE_MS) return null
+        if (isSampleStale(distance.timestamp, nowMs)) return null
         // isTooClose also covers a merely fast-closing vehicle (ttc < 2.5 s)
         // that is still far away; only a genuinely close one is a collision.
         // The user's following-distance setting raises the range.
@@ -176,7 +195,7 @@ class AlertPolicy {
         if (laneInfo == null || laneInfo.confidence < MIN_LANE_CONFIDENCE) return null
         // Mirror of collisionHazard: a lane sample computed from an old frame
         // (paused video, stalled pipeline) must not hold an alarm forever.
-        if (nowMs - laneInfo.timestamp > STALE_MS) return null
+        if (isSampleStale(laneInfo.timestamp, nowMs)) return null
         return when {
             laneInfo.isDriftingLeft -> WarningType.LaneDepartureLeft
             laneInfo.isDriftingRight -> WarningType.LaneDepartureRight
@@ -189,7 +208,7 @@ class AlertPolicy {
         return AlertState.Warning(
             type = type,
             phase = if (confirmedAtMs > 0L) AlertPhase.ACTIVE else AlertPhase.CONFIRMING,
-            ageMs = ageMs,
+            ageMs = ageMs.coerceAtLeast(0L),
             repeatCount = repeatCount
         )
     }

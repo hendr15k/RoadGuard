@@ -71,6 +71,37 @@ class DriveRecordTest {
         assertEquals(0L, backwards.durationMs)
         assertEquals(0f, backwards.warningTimeFraction, 0f)
     }
+
+    @Test
+    fun theMappedScoreMatchesThePersistedDuration() {
+        // The snapshot's score was computed from stats.nowMs, while the record
+        // stores endedAtMs. When the archiver ends the drive at a different
+        // time, the history row reported a score for another duration.
+        val startedAt = 1_000_000L
+        val snapshotNow = startedAt + 120_000L          // 2 minutes in
+        val endedAt = startedAt + 300_000L              // 5 minutes when filed
+
+        val stats = DriveSessionStats(
+            startedAtMs = startedAt,
+            nowMs = snapshotNow,
+            laneDepartureCount = 4,
+            collisionCount = 1
+        )
+        val expected = DriveRecord.safetyScoreOf(
+            startedAtMs = startedAt,
+            endedAtMs = endedAt,
+            laneDepartureCount = 4,
+            collisionCount = 1,
+            urgentCollisionCount = 0
+        )
+
+        val record = DriveRecord.from(stats, endedAtMs = endedAt)
+        assertEquals(expected, record.safetyScore)
+        assertEquals(300_000L, record.durationMs)
+        // The old behaviour copied stats.safetyScore (rate over 2 min) into a
+        // record whose duration says 5 min — a different number.
+        assertTrue(stats.safetyScore != record.safetyScore)
+    }
 }
 
 class DriveLogTest {
@@ -144,6 +175,31 @@ class DriveLogTest {
     @Test
     fun theDefaultCapMatchesTheDocumentedHistorySize() {
         assertEquals(30, DriveLog.DEFAULT_MAX_ENTRIES)
+    }
+
+    @Test
+    fun withAppendedPreservesANonDefaultCap() {
+        // The copy was built with DriveLog(), i.e. the DEFAULT cap, so a log
+        // with a custom cap lost its bound on every write path.
+        val original = DriveLog(maxEntries = 3)
+        for (i in 1..3) {
+            assertTrue(original.add(DriveRecord(startedAtMs = i.toLong(), endedAtMs = i + 60_000L)))
+        }
+        val updated = original.withAppended(DriveRecord(startedAtMs = 4L, endedAtMs = 4 + 60_000L))
+        assertEquals(3, updated!!.records.size)
+        assertEquals(4L, updated.records.first().startedAtMs)
+    }
+
+    @Test
+    fun clearedPreservesTheCap() {
+        val original = DriveLog(maxEntries = 3)
+        val cleared = original.cleared()
+        cleared as DriveLog
+        // Same bound after clearing: re-filling must still evict at 3.
+        for (i in 5..12) {
+            assertTrue(cleared.add(DriveRecord(startedAtMs = i.toLong(), endedAtMs = i + 60_000L)))
+        }
+        assertEquals(3, cleared.records.size)
     }
 
     @Test

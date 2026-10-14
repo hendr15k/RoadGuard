@@ -152,9 +152,10 @@ class MainViewModel @Inject constructor(
         session.recordState(evaluation.state, nowMs)
         if (evaluation.signal != null) {
             _alertSignal.value = evaluation.signal
-            if (session.recordSignal(evaluation.signal, nowMs)) {
-                _alertHistory.value = session.log()
-            }
+            // recordSignal() appends the entry first so the history view can
+            // see the repeat, then stats() (below) reads the updated counts.
+            session.recordSignal(evaluation.signal, nowMs)
+            _alertHistory.value = session.log()
         }
         _sessionStats.value = session.stats(nowMs)
     }
